@@ -8,6 +8,7 @@ import {
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
   defaultEnabledForDriver,
+  HermesSettings,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -20,6 +21,7 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeHermesSettings = Schema.decodeUnknownSync(HermesSettings);
 
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
@@ -438,6 +440,7 @@ describe("provider enabled defaults", () => {
     expect(decoded.providers.claudeAgent.enabled).toBe(true);
     expect(decoded.providers.cursor.enabled).toBe(false);
     expect(decoded.providers.grok.enabled).toBe(false);
+    expect(decoded.providers.hermes.enabled).toBe(false);
     expect(decoded.providers.opencode.enabled).toBe(false);
   });
 
@@ -667,5 +670,18 @@ describe("ServerSettings environment icon", () => {
   it("round-trips through encode", () => {
     const settings = decodeServerSettings({ environmentIcon: "laptop" });
     expect(encodeServerSettings(settings).environmentIcon).toBe("laptop");
+  });
+});
+
+describe("HermesSettings", () => {
+  it("decodes defaults", () => {
+    const decoded = decodeHermesSettings({});
+    expect(decoded.enabled).toBe(false);
+    expect(decoded.binaryPath).toBe("hermes");
+    expect(decoded.customModels).toEqual([]);
+  });
+
+  it("is reachable via ServerSettings defaults", () => {
+    expect(decodeServerSettings({}).providers.hermes.binaryPath).toBe("hermes");
   });
 });
