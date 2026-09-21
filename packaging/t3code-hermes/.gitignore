@@ -1,0 +1,5 @@
+T3-Code-Hermes.AppImage
+LICENSE
+*.pkg.tar.zst
+src/
+pkg/

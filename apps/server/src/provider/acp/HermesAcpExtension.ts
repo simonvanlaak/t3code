@@ -63,7 +63,7 @@ export function extractHermesAcpSubagentUpdate(
   return {
     nativeTaskId,
     prompt: text(input.goal) ?? toolCall.title ?? "Hermes subagent",
-    title: text(input.role) ?? null,
+    title: text(input.role) ?? text(input.goal) ?? null,
     model: text(input.model) ?? null,
     status: status(output?.status, toolCall.status),
     childSessionId: text(output?.childSessionId) ?? text(input.childSessionId) ?? null,

@@ -17,6 +17,7 @@ import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe, expect } from "vite-plus/test";
@@ -84,6 +85,129 @@ describe.runIf(process.env.T3_HERMES_ACP_PROBE === "1")("Hermes ACP CLI probe", 
         expect(chunks.join("").length).toBeGreaterThan(0);
         yield* Fiber.interrupt(events);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    300_000,
+  );
+
+  it.effect.skipIf(process.env.T3_HERMES_LIVE_DELEGATION !== "1")(
+    "streams a real Hermes child-agent lifecycle",
+    () =>
+      Effect.gen(function* () {
+        const runtime = yield* makeProbeRuntime;
+        yield* runtime.start();
+        const lifecycle: Array<{ status: string; childSessionId: string | null }> = [];
+        const events = yield* Stream.runForEach(runtime.getEvents(), (event) => {
+          if (event._tag === "EventStreamBarrier") {
+            return Deferred.succeed(event.acknowledge, undefined);
+          }
+          if (event._tag === "ToolCallUpdated") {
+            const input = event.toolCall.data.rawInput as Record<string, unknown> | undefined;
+            if (input?.hermesSubagent === true) {
+              const output = event.toolCall.data.rawOutput as Record<string, unknown> | undefined;
+              lifecycle.push({
+                status: String(output?.status ?? event.toolCall.status),
+                childSessionId:
+                  typeof output?.childSessionId === "string"
+                    ? output.childSessionId
+                    : typeof input.childSessionId === "string"
+                      ? input.childSessionId
+                      : null,
+              });
+            }
+          }
+          return Effect.void;
+        }).pipe(Effect.forkChild);
+        const result = yield* runtime.prompt({
+          prompt: [
+            {
+              type: "text",
+              text: "You MUST call delegate_task exactly once with one child. Ask it to reply exactly CHILD_OK, wait for it, then reply exactly PARENT_OK.",
+            },
+          ],
+        });
+        yield* runtime.drainEvents;
+        expect(result.stopReason).toBe("end_turn");
+        expect(lifecycle.some((entry) => entry.status === "running")).toBe(true);
+        expect(lifecycle.some((entry) => entry.status === "completed")).toBe(true);
+        expect(lifecycle.some((entry) => entry.childSessionId !== null)).toBe(true);
+        yield* Fiber.interrupt(events);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    300_000,
+  );
+
+  it.skipIf(process.env.T3_HERMES_LIVE_INTERRUPTION !== "1")(
+    "interrupts and resumes a real Hermes session",
+    () =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const runtime = yield* makeProbeRuntime;
+          yield* runtime.start();
+          const dispatched = yield* Deferred.make<void>();
+          const activePrompt = yield* runtime
+            .prompt(
+              {
+                prompt: [
+                  {
+                    type: "text",
+                    text: "Run the terminal command `sleep 60`, wait for it, then reply SHOULD_NOT_COMPLETE.",
+                  },
+                ],
+              },
+              { dispatched },
+            )
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(dispatched);
+          // Give Hermes enough time to enter its model/tool loop before cancellation.
+          yield* Effect.sleep("5 seconds");
+          const cancelSent = yield* runtime.cancel.pipe(Effect.timeoutOption("30 seconds"));
+          expect(Option.isSome(cancelSent)).toBe(true);
+          const cancelled = yield* Fiber.await(activePrompt).pipe(
+            Effect.timeoutOption("30 seconds"),
+          );
+          expect(Option.isSome(cancelled)).toBe(true);
+
+          const resumed = yield* runtime
+            .prompt({
+              prompt: [{ type: "text", text: "Reply exactly RESUMED_OK. Do not use tools." }],
+            })
+            .pipe(Effect.timeoutOption("90 seconds"));
+          expect(Option.isSome(resumed)).toBe(true);
+          if (Option.isSome(resumed)) expect(resumed.value.stopReason).toBe("end_turn");
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      ),
+    300_000,
+  );
+
+  it.skipIf(process.env.T3_HERMES_LIVE_RECOVERY !== "1")(
+    "loads and continues a Hermes session after runtime restart",
+    () =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const sessionId = yield* Effect.gen(function* () {
+            const runtime = yield* makeProbeRuntime;
+            const started = yield* runtime.start();
+            const first = yield* runtime.prompt({
+              prompt: [{ type: "text", text: "Reply exactly BEFORE_RESTART. Do not use tools." }],
+            });
+            expect(first.stopReason).toBe("end_turn");
+            return started.sessionId;
+          }).pipe(Effect.scoped);
+
+          yield* Effect.gen(function* () {
+            const runtime = yield* makeProbeRuntime;
+            const loaded = yield* runtime.loadSession(sessionId);
+            expect(loaded.sessionId).toBe(sessionId);
+            const second = yield* runtime.prompt({
+              prompt: [
+                {
+                  type: "text",
+                  text: "Continue this recovered session and reply exactly AFTER_RESTART. Do not use tools.",
+                },
+              ],
+            });
+            expect(second.stopReason).toBe("end_turn");
+          }).pipe(Effect.scoped);
+        }).pipe(Effect.provide(NodeServices.layer)),
+      ),
     300_000,
   );
 });

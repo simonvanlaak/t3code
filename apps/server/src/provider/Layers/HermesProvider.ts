@@ -1,10 +1,17 @@
+// @effect-diagnostics nodeBuiltinImport:off - bounded read-only discovery maps
+// Hermes CLI skill names back to their SKILL.md files.
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
 import type {
   HermesSettings,
   ModelCapabilities,
   ServerProvider,
   ServerProviderAuth,
   ServerProviderModel,
+  ServerProviderSkill,
   ServerProviderState,
+  ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { causeErrorTag } from "@t3tools/shared/observability";
@@ -33,31 +40,52 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { makeHermesAcpRuntime } from "../acp/HermesAcpSupport.ts";
+import { HERMES_DEFAULT_MODEL_SLUG, makeHermesAcpRuntime } from "../acp/HermesAcpSupport.ts";
 
 const HERMES_PRESENTATION = {
   displayName: "Hermes",
   badgeLabel: "Experimental",
   showInteractionModeToggle: false,
 } as const;
-const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
-  optionDescriptors: [],
+const HERMES_REASONING_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+  optionDescriptors: [
+    {
+      id: "reasoningEffort",
+      label: "Reasoning",
+      type: "select",
+      currentValue: "medium",
+      options: [
+        { id: "none", label: "None" },
+        { id: "minimal", label: "Minimal" },
+        { id: "low", label: "Low" },
+        { id: "medium", label: "Medium", isDefault: true },
+        { id: "high", label: "High" },
+        { id: "xhigh", label: "Extra high" },
+        { id: "max", label: "Max" },
+      ],
+    },
+  ],
 });
 
 const HERMES_VERSION_PROBE_TIMEOUT_MS = 4_000;
 const HERMES_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+const HERMES_SKILLS_DISCOVERY_TIMEOUT_MS = 10_000;
+const HERMES_USAGE_DISCOVERY_TIMEOUT_MS = 10_000;
 const HERMES_ACP_MODEL_DISCOVERY_FAILED_MESSAGE = [
   "Hermes ACP model discovery failed.",
   "Hermes may not be configured on this machine yet; run `hermes setup` (or `hermes acp --setup`), then retry.",
   "Check server logs for ACP details.",
 ].join(" ");
+const HERMES_CHATGPT_SUBSCRIPTION_LABEL = "ChatGPT or Codex Subscription";
+const HERMES_CHATGPT_SUBSCRIPTION_SHORT_LABEL = "ChatGPT Sub";
 
 const HERMES_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
-    slug: "default",
+    slug: HERMES_DEFAULT_MODEL_SLUG,
     name: "Hermes (configured default)",
     isCustom: false,
-    capabilities: EMPTY_CAPABILITIES,
+    isDefault: true,
+    capabilities: HERMES_REASONING_CAPABILITIES,
   },
 ];
 
@@ -100,12 +128,28 @@ export function buildInitialHermesProviderSnapshot(
   });
 }
 
+export function formatHermesModelName(name: string, slug: string): string {
+  const trimmedName = name.trim() || slug;
+  if (trimmedName === HERMES_CHATGPT_SUBSCRIPTION_LABEL) {
+    return HERMES_CHATGPT_SUBSCRIPTION_SHORT_LABEL;
+  }
+  if (trimmedName.startsWith(`${HERMES_CHATGPT_SUBSCRIPTION_LABEL} ·`)) {
+    return `${HERMES_CHATGPT_SUBSCRIPTION_SHORT_LABEL}${trimmedName.slice(HERMES_CHATGPT_SUBSCRIPTION_LABEL.length)}`;
+  }
+  return trimmedName;
+}
+
 function buildHermesDiscoveredModelsFromSessionModelState(
   modelState: EffectAcpSchema.SessionModelState | null | undefined,
 ): ReadonlyArray<ServerProviderModel> {
   if (!modelState || modelState.availableModels.length === 0) {
     return [];
   }
+  // Mark the session's current model as the default so the model resolver
+  // binds new sessions to it instead of the catalog's first entry — without
+  // this a session/set_model fires on every start, switching the agent away
+  // from its own configured model.
+  const currentModelId = modelState.currentModelId?.trim();
   const seen = new Set<string>();
   return modelState.availableModels.flatMap((model) => {
     const slug = model.modelId.trim();
@@ -116,9 +160,10 @@ function buildHermesDiscoveredModelsFromSessionModelState(
     return [
       {
         slug,
-        name: model.name.trim() || slug,
+        name: formatHermesModelName(model.name, slug),
         isCustom: false,
-        capabilities: EMPTY_CAPABILITIES,
+        ...(slug === currentModelId ? { isDefault: true } : {}),
+        capabilities: HERMES_REASONING_CAPABILITIES,
       } satisfies ServerProviderModel,
     ];
   });
@@ -141,13 +186,164 @@ export const discoverHermesModelsViaAcp = (
     return buildHermesDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models);
   }).pipe(Effect.scoped);
 
+export function parseHermesEnabledSkillNames(stdout: string): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const rawLine of stdout.replaceAll(/\x1b\[[0-9;]*m/g, "").split("\n")) {
+    const match = /^│\s*([^│]+?)\s*│/.exec(rawLine);
+    const name = match?.[1]?.trim();
+    if (name && name !== "Name") names.add(name);
+  }
+  return names;
+}
+
+function findHermesSkillFiles(root: string): ReadonlyMap<string, string> {
+  const files = new Map<string, string>();
+  if (!NodeFS.existsSync(root)) return files;
+  const pending = [root];
+  let visited = 0;
+  while (pending.length > 0 && visited < 10_000) {
+    const directory = pending.pop()!;
+    visited += 1;
+    let entries: NodeFS.Dirent[];
+    try {
+      entries = NodeFS.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const skillPath = NodePath.join(directory, "SKILL.md");
+    if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) {
+      const directoryName = NodePath.basename(directory);
+      files.set(directoryName, skillPath);
+      try {
+        const frontmatter = NodeFS.readFileSync(skillPath, "utf8").slice(0, 16_384);
+        const declaredName = /^---\r?\n[\s\S]*?^name:\s*["']?([^\r\n"']+)/m
+          .exec(frontmatter)?.[1]
+          ?.trim();
+        if (declaredName) files.set(declaredName, skillPath);
+      } catch {
+        // The directory name remains usable when optional metadata is unreadable.
+      }
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith(".")) {
+        pending.push(NodePath.join(directory, entry.name));
+      }
+    }
+  }
+  return files;
+}
+
+export const discoverHermesSkills = (
+  hermesSettings: Pick<HermesSettings, "binaryPath">,
+  environment: NodeJS.ProcessEnv = process.env,
+) =>
+  Effect.gen(function* () {
+    const command = hermesSettings.binaryPath || "hermes";
+    const skillEnvironment: NodeJS.ProcessEnv = { ...environment, COLUMNS: "500" };
+    const spawnCommand = yield* resolveSpawnCommand(command, ["skills", "list", "--enabled-only"], {
+      env: skillEnvironment,
+    });
+    const result = yield* spawnAndCollect(
+      command,
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        env: skillEnvironment,
+        shell: spawnCommand.shell,
+      }),
+    );
+    if (result.code !== 0) return [];
+    const enabledNames = parseHermesEnabledSkillNames(result.stdout);
+    const home = skillEnvironment.HOME?.trim();
+    if (!home) return [];
+    const files = findHermesSkillFiles(NodePath.join(home, ".hermes", "skills"));
+    const fallbackNames = [...files.keys()].sort((left, right) => right.length - left.length);
+    return [...enabledNames].flatMap((name): ReadonlyArray<ServerProviderSkill> => {
+      const path =
+        files.get(name) ??
+        files.get(fallbackNames.find((candidate) => name.startsWith(`${candidate}-`)) ?? "");
+      return path ? [{ name, path, scope: "user", enabled: true }] : [];
+    });
+  });
+
+export function parseHermesUsageLimits(
+  stdout: string,
+  fallbackCheckedAt: string,
+): ServerProviderUsageLimits | undefined {
+  const jsonStart = stdout.indexOf("{");
+  if (jsonStart < 0) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout.slice(jsonStart));
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.windows)) return undefined;
+  const windows = record.windows.flatMap((entry, index) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const window = entry as Record<string, unknown>;
+    const label = typeof window.label === "string" ? window.label.trim() : "";
+    const usedPercent = typeof window.used_percent === "number" ? window.used_percent : Number.NaN;
+    if (!label || !Number.isFinite(usedPercent)) return [];
+    const normalized = label.toLowerCase();
+    const kind = normalized.includes("week")
+      ? ("weekly" as const)
+      : normalized.includes("month")
+        ? ("monthly" as const)
+        : normalized.includes("hour") || normalized.includes("session")
+          ? ("session" as const)
+          : ("other" as const);
+    const resetsAt = typeof window.resets_at === "string" ? window.resets_at.trim() : "";
+    return [
+      {
+        id: normalized.replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || `window_${index}`,
+        kind,
+        label,
+        usedPercent: Math.max(0, Math.min(100, usedPercent)),
+        ...(resetsAt ? { resetsAt } : {}),
+      },
+    ];
+  });
+  const fetchedAt = typeof record.fetched_at === "string" ? record.fetched_at.trim() : "";
+  const details = Array.isArray(record.details)
+    ? record.details.filter((detail): detail is string => typeof detail === "string")
+    : [];
+  const resetMatch = details.join(" ").match(/\b(\d+)\s+resets?\s+banked\b/i);
+  return {
+    checkedAt: fetchedAt || fallbackCheckedAt,
+    windows,
+    ...(resetMatch ? { resetCredits: { availableCount: Number(resetMatch[1]) } } : {}),
+  };
+}
+
+const discoverHermesUsageLimits = (
+  hermesSettings: Pick<HermesSettings, "binaryPath">,
+  checkedAt: string,
+  environment: NodeJS.ProcessEnv = process.env,
+) =>
+  Effect.gen(function* () {
+    const command = hermesSettings.binaryPath || "hermes";
+    const spawnCommand = yield* resolveSpawnCommand(command, ["usage", "--json"], {
+      env: environment,
+    });
+    const result = yield* spawnAndCollect(
+      command,
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        env: environment,
+        shell: spawnCommand.shell,
+      }),
+    );
+    return result.code === 0 ? parseHermesUsageLimits(result.stdout, checkedAt) : undefined;
+  });
+
 export function getHermesFallbackModels(
   hermesSettings: Pick<HermesSettings, "customModels">,
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(
     HERMES_BUILT_IN_MODELS,
     hermesSettings.customModels,
-    EMPTY_CAPABILITIES,
+    HERMES_REASONING_CAPABILITIES,
   );
 }
 
@@ -195,6 +391,8 @@ export function buildHermesProviderSnapshot(input: {
   readonly hermesSettings: HermesSettings;
   readonly parsed: HermesVersionResult;
   readonly discoveredModels?: ReadonlyArray<ServerProviderModel>;
+  readonly discoveredSkills?: ReadonlyArray<ServerProviderSkill>;
+  readonly usageLimits?: ServerProviderUsageLimits;
   readonly discoveryWarning?: string;
 }): ServerProviderDraft {
   const message = joinProviderMessages(input.parsed.message, input.discoveryWarning);
@@ -207,14 +405,16 @@ export function buildHermesProviderSnapshot(input: {
         ? input.discoveredModels
         : HERMES_BUILT_IN_MODELS,
       input.hermesSettings.customModels,
-      EMPTY_CAPABILITIES,
+      HERMES_REASONING_CAPABILITIES,
     ),
+    skills: input.discoveredSkills ?? [],
     probe: {
       installed: true,
       version: input.parsed.version,
       status:
         input.discoveryWarning && input.parsed.status === "ready" ? "warning" : input.parsed.status,
       auth: input.parsed.auth,
+      ...(input.usageLimits ? { usageLimits: input.usageLimits } : {}),
       ...(message ? { message } : {}),
     },
   });
@@ -327,6 +527,8 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
   // proof of authentication.
   let auth: ServerProviderAuth = parsed.auth;
   let discoveredModels = Option.none<ReadonlyArray<ServerProviderModel>>();
+  let discoveredSkills: ReadonlyArray<ServerProviderSkill> = [];
+  let usageLimits: ServerProviderUsageLimits | undefined;
   let discoveryWarning: string | undefined;
   if (parsed.status === "ready") {
     const discoveryExit = yield* Effect.exit(
@@ -348,6 +550,20 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
       discoveredModels = discoveryExit.value;
       auth = { status: "authenticated" };
     }
+    discoveredSkills = yield* discoverHermesSkills(hermesSettings, environment ?? process.env).pipe(
+      Effect.timeoutOption(HERMES_SKILLS_DISCOVERY_TIMEOUT_MS),
+      Effect.map(Option.getOrElse(() => [] as const)),
+      Effect.catch(() => Effect.succeed([] as const)),
+    );
+    usageLimits = yield* discoverHermesUsageLimits(
+      hermesSettings,
+      checkedAt,
+      environment ?? process.env,
+    ).pipe(
+      Effect.timeoutOption(HERMES_USAGE_DISCOVERY_TIMEOUT_MS),
+      Effect.map(Option.getOrUndefined),
+      Effect.catch(() => Effect.succeed(undefined)),
+    );
   }
   return buildHermesProviderSnapshot({
     checkedAt,
@@ -357,6 +573,8 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
       Option.filter(discoveredModels, (models) => models.length > 0),
       () => [] as const,
     ),
+    discoveredSkills,
+    ...(usageLimits ? { usageLimits } : {}),
     ...(discoveryWarning ? { discoveryWarning } : {}),
   });
 });

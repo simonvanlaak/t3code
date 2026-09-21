@@ -23,6 +23,16 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider?.trim().toLowerCase() === "hermes") {
+    return (
+      <Image
+        source={require("../../assets/hermes-icon.png")}
+        style={{ width: size, height: size }}
+        contentFit="contain"
+      />
+    );
+  }
+
   if (props.provider === "claudeAgent") {
     return (
       <Svg width={size} height={size} viewBox="0 0 256 257" fill="none">

@@ -5,6 +5,7 @@ import {
   CodexSettings,
   CursorSettings,
   GrokSettings,
+  HermesSettings,
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
@@ -15,6 +16,7 @@ import {
   ClaudeAI,
   CursorIcon,
   GrokIcon,
+  HermesIcon,
   type Icon,
   OpenAI,
   OpenCodeIcon,
@@ -89,6 +91,13 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Grok",
     icon: GrokIcon,
     settingsSchema: GrokSettings,
+  },
+  {
+    value: ProviderDriverKind.make("hermes"),
+    label: "Hermes",
+    icon: HermesIcon,
+    settingsSchema: HermesSettings,
+    badgeLabel: "Experimental",
   },
   {
     value: ProviderDriverKind.make("acpRegistry"),

@@ -101,9 +101,11 @@ export function materializeReplayTranscriptRuntimeInstructions(
       ? "Cursor"
       : runtime.driver === "grok"
         ? "Grok"
-        : runtime.driver === "acpRegistry"
-          ? "acpRegistry"
-          : undefined;
+        : runtime.driver === "hermes"
+          ? "Hermes"
+          : runtime.driver === "acpRegistry"
+            ? "acpRegistry"
+            : undefined;
   if (harness === undefined) return transcript;
   const instructions = buildRuntimeInstructions({ harness, model: runtime.model });
 

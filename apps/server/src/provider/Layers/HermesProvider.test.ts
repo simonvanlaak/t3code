@@ -12,8 +12,11 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import {
   buildHermesProviderSnapshot,
   checkHermesProviderStatus,
+  formatHermesModelName,
   getHermesFallbackModels,
+  parseHermesEnabledSkillNames,
   parseHermesCliVersion,
+  parseHermesUsageLimits,
   parseHermesVersionOutput,
 } from "./HermesProvider.ts";
 
@@ -103,6 +106,9 @@ const makeMockHermesWrapper = Effect.fn("makeMockHermesWrapper")(function* (opti
 if [ "$1" = "--version" ]; then
   ${versionCommand}
 fi
+if [ "$1" = "skills" ] || [ "$1" = "usage" ]; then
+  exit 0
+fi
 ${acpCommand}
 `;
   const wrapperPath = path.join(dir, "fake-hermes.sh");
@@ -170,6 +176,64 @@ describe("getHermesFallbackModels", () => {
         customModels: ["anthropic:claude-fable-5"],
       }).map((model) => model.slug),
     ).toEqual(["default", "anthropic:claude-fable-5"]);
+  });
+});
+
+describe("formatHermesModelName", () => {
+  it("shortens the ChatGPT subscription source while preserving the model name", () => {
+    expect(
+      formatHermesModelName(
+        "ChatGPT or Codex Subscription · gpt-6-astra",
+        "openai-codex:gpt-6-astra",
+      ),
+    ).toBe("ChatGPT Sub · gpt-6-astra");
+  });
+
+  it("leaves unrelated provider model names unchanged", () => {
+    expect(formatHermesModelName("Anthropic · Claude Sonnet", "anthropic:claude-sonnet")).toBe(
+      "Anthropic · Claude Sonnet",
+    );
+  });
+});
+
+describe("Hermes CLI metadata", () => {
+  it("parses full enabled skill names from the Rich table", () => {
+    const table = [
+      "┃ Name                     ┃ Status  ┃",
+      "│ systematic-debugging     │ enabled │",
+      "│ gitlab-cli-skills        │ enabled │",
+    ].join("\n");
+    expect([...parseHermesEnabledSkillNames(table)]).toEqual([
+      "systematic-debugging",
+      "gitlab-cli-skills",
+    ]);
+  });
+
+  it("maps Hermes account windows and banked resets to T3 usage limits", () => {
+    expect(
+      parseHermesUsageLimits(
+        JSON.stringify({
+          fetched_at: "2026-09-21T14:11:17.136003+00:00",
+          windows: [
+            { label: "Weekly", used_percent: 87.5, resets_at: "2026-09-23T15:28:14+00:00" },
+          ],
+          details: ["You have 2 resets banked - use /usage reset to activate"],
+        }),
+        "2026-09-21T14:00:00.000Z",
+      ),
+    ).toEqual({
+      checkedAt: "2026-09-21T14:11:17.136003+00:00",
+      windows: [
+        {
+          id: "weekly",
+          kind: "weekly",
+          label: "Weekly",
+          usedPercent: 87.5,
+          resetsAt: "2026-09-23T15:28:14+00:00",
+        },
+      ],
+      resetCredits: { availableCount: 2 },
+    });
   });
 });
 

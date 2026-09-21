@@ -1,7 +1,15 @@
 import React, { type SVGProps, useId } from "react";
 import { cn } from "~/lib/utils";
+import hermesIconUrl from "../assets/hermes-icon.png";
 
 export type Icon = React.FC<SVGProps<SVGSVGElement>>;
+
+/** Official Hermes Agent mark. */
+export const HermesIcon: Icon = (props) => (
+  <svg {...props} viewBox="0 0 48 48" fill="none">
+    <image href={hermesIconUrl} width="48" height="48" />
+  </svg>
+);
 
 export const GitHubIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 1024 1024" fill="none">

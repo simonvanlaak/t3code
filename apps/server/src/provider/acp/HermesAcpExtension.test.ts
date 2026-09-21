@@ -9,7 +9,7 @@ describe("extractHermesAcpSubagentUpdate", () => {
         toolCallId: "tc-child",
         title: "[subagent] Inspect orchestration",
         kind: "think",
-        status: "in_progress",
+        status: "inProgress",
         data: {
           rawInput: {
             hermesSubagent: true,
@@ -28,7 +28,7 @@ describe("extractHermesAcpSubagentUpdate", () => {
     ).toEqual({
       nativeTaskId: "child-1",
       prompt: "Inspect orchestration",
-      title: null,
+      title: "Inspect orchestration",
       model: "openai-codex:gpt-5.6-sol",
       status: "running",
       childSessionId: "session-child-1",
