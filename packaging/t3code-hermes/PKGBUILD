@@ -21,7 +21,7 @@ options=('!debug' '!strip')
 _appimage='T3-Code-Hermes.AppImage'
 source=("$_appimage" 'LICENSE')
 sha256sums=(
-  '9abea1b9680bc867ef2d9adad3dd6c37bb82f24f499e195684ef2c1ec5b8d08e'
+  '159abfe4d2edad56442fc6870a99ef83967b9287ce41324dad15317c21a21578'
   '935d8f2af0c703f9c39517ee57cc4930b19d02d533be930b63f0e82f93614b43'
 )
 
