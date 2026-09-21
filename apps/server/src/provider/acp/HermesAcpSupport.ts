@@ -5,11 +5,15 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 /** Auth method advertised by `hermes acp` for pre-configured runtime credentials. */
-const HERMES_AUTH_METHOD_ID = "custom";
+export const HERMES_AUTH_METHOD_ID = "custom";
+
+/** Product slug meaning "keep Hermes' configured model". */
+export const HERMES_DEFAULT_MODEL_SLUG = "default";
 
 type HermesAcpRuntimeHermesSettings = Pick<HermesSettings, "binaryPath">;
 
@@ -58,3 +62,42 @@ export const makeHermesAcpRuntime = (
       Effect.provide(acpContext),
     );
   });
+
+export function currentHermesModelIdFromSessionSetup(
+  sessionSetupResult:
+    | EffectAcpSchema.LoadSessionResponse
+    | EffectAcpSchema.NewSessionResponse
+    | EffectAcpSchema.ResumeSessionResponse,
+): string | undefined {
+  return sessionSetupResult.models?.currentModelId?.trim() || undefined;
+}
+
+type HermesAcpModelSelectionRuntime = Pick<
+  AcpSessionRuntime.AcpSessionRuntime["Service"],
+  "setSessionModel"
+>;
+
+export function applyHermesAcpModelSelection<E>(input: {
+  readonly runtime: HermesAcpModelSelectionRuntime;
+  readonly currentModelId?: string | undefined;
+  readonly model: string;
+  readonly reasoningEffort?: string | undefined;
+  readonly mapError: (context: { readonly cause: EffectAcpErrors.AcpError }) => E;
+}): Effect.Effect<void, E> {
+  const requestedModelId = input.model.trim();
+  if (requestedModelId.length === 0 || requestedModelId === HERMES_DEFAULT_MODEL_SLUG) {
+    return Effect.void;
+  }
+  if (requestedModelId === input.currentModelId && input.reasoningEffort === undefined) {
+    return Effect.void;
+  }
+  return input.runtime
+    .setSessionModel(
+      requestedModelId,
+      input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : undefined,
+    )
+    .pipe(
+      Effect.asVoid,
+      Effect.mapError((cause) => input.mapError({ cause })),
+    );
+}

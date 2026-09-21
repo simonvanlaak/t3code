@@ -24,8 +24,11 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeHermesTextGeneration } from "../../textGeneration/HermesTextGeneration.ts";
+import {
+  HermesAdapterV2Driver,
+  type HermesAdapterV2DriverEnv,
+} from "../../orchestration-v2/Adapters/HermesAdapterV2.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeHermesAdapter } from "../Layers/HermesAdapter.ts";
 import {
   buildInitialHermesProviderSnapshot,
   checkHermesProviderStatus,
@@ -40,11 +43,7 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import {
-  makeManualOnlyProviderMaintenanceCapabilities,
-  makeStaticProviderMaintenanceResolver,
-  resolveProviderMaintenanceCapabilitiesEffect,
-} from "../providerMaintenance.ts";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
@@ -53,16 +52,13 @@ import {
 const decodeHermesSettings = Schema.decodeSync(HermesSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("hermes");
-const UPDATE = makeStaticProviderMaintenanceResolver(
-  makeManualOnlyProviderMaintenanceCapabilities({
-    provider: DRIVER_KIND,
-    packageName: null,
-  }),
-);
+const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
+  provider: DRIVER_KIND,
+  packageName: null,
+});
 
-// `ServerConfig` stays in the union even though `create` never yields it
-// directly: `makeHermesAdapter` reads it for the attachments directory.
 export type HermesDriverEnv =
+  | HermesAdapterV2DriverEnv
   | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
@@ -103,7 +99,6 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
-      const eventLoggers = yield* ProviderEventLoggers;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
@@ -116,16 +111,25 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies HermesSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
-      });
 
-      const adapter = yield* makeHermesAdapter(effectiveConfig, {
-        environment: processEnv,
-        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+      const orchestrationAdapter = yield* HermesAdapterV2Driver.create({
         instanceId,
-      });
+        displayName,
+        accentColor,
+        environment,
+        enabled,
+        config,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: "Failed to build Hermes orchestration adapter.",
+              cause,
+            }),
+        ),
+      );
       const textGeneration = yield* makeHermesTextGeneration(effectiveConfig, processEnv);
 
       const checkProvider = checkHermesProviderStatus(effectiveConfig, processEnv).pipe(
@@ -136,7 +140,7 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
       const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<HermesSettings>>({
-        maintenanceCapabilities,
+        resolveMaintenance: () => Effect.succeed(MAINTENANCE_CAPABILITIES),
         getSettings: snapshotSettings.getSettings,
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
@@ -149,7 +153,7 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
           enrichHermesSnapshot({
             settings: settings.provider,
             snapshot: currentSnapshot,
-            maintenanceCapabilities,
+            maintenanceCapabilities: MAINTENANCE_CAPABILITIES,
             enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
             publishSnapshot,
             stampIdentity,
@@ -175,7 +179,7 @@ export const HermesDriver: ProviderDriver<HermesSettings, HermesDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        adapter,
+        orchestrationAdapter,
         textGeneration,
       } satisfies ProviderInstance;
     }),

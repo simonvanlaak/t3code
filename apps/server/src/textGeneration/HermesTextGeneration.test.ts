@@ -113,7 +113,11 @@ it.layer(HermesTextGenerationTestLayer)("HermesTextGeneration", (it) => {
             stagedSummary: "M apps/server/src/textGeneration/HermesTextGeneration.ts",
             stagedPatch:
               "diff --git a/apps/server/src/textGeneration/HermesTextGeneration.ts b/apps/server/src/textGeneration/HermesTextGeneration.ts",
-            modelSelection: createModelSelection(ProviderInstanceId.make("hermes"), "composer-2"),
+            // The shared ACP mock only accepts its advertised model ids.
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("hermes"),
+              "grok-mock-alt",
+            ),
           });
 
           expect(generated.subject).toBe("Add generated commit message");
@@ -136,9 +140,8 @@ it.layer(HermesTextGenerationTestLayer)("HermesTextGeneration", (it) => {
           expect(
             requests.some(
               (request) =>
-                request.method === "session/set_config_option" &&
-                request.params?.configId === "model" &&
-                request.params?.value === "composer-2",
+                request.method === "session/set_model" &&
+                request.params?.modelId === "grok-mock-alt",
             ),
           ).toBe(true);
           expect(
