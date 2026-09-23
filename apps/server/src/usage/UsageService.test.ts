@@ -3,11 +3,12 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
-import { UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
+import { ProviderInstanceId, UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -71,6 +72,7 @@ const serviceLayers = (input: {
   readonly onRatesFetch?: () => void;
   /** Defaults to an unparsable document so every scan retries the fetch. */
   readonly ratesDocument?: unknown;
+  readonly hostEnvironment?: NodeJS.ProcessEnv;
 }) =>
   ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
@@ -89,7 +91,10 @@ const serviceLayers = (input: {
       ),
     ),
     Layer.provideMerge(
-      Layer.succeed(HostProcessEnvironment, { GROK_HOME: NodePath.join(input.home, "grok") }),
+      Layer.succeed(HostProcessEnvironment, {
+        GROK_HOME: NodePath.join(input.home, "grok"),
+        ...input.hostEnvironment,
+      }),
     ),
   );
 
@@ -290,6 +295,121 @@ describe("UsageService", () => {
       assert.strictEqual(refreshed.status, "fresh");
       assert.strictEqual(refreshed.knownModels, 1);
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.live(
+    "resolves every Hermes instance home, deduplicates duplicate fingerprints, and honors hourly windows",
+    () =>
+      Effect.gen(function* () {
+        const { settings: baseSettings, home } = yield* setup;
+        const hermesA = NodePath.join(home, "hermes-a");
+        const hermesB = NodePath.join(home, "hermes-b");
+        const missingHermes = NodePath.join(home, "hermes-missing");
+        const hermesAlias = NodePath.join(home, "hermes-a-alias");
+        yield* Effect.promise(async () => {
+          await Promise.all([
+            NodeFSP.mkdir(hermesA, { recursive: true }),
+            NodeFSP.mkdir(hermesB, { recursive: true }),
+          ]);
+          await NodeFSP.symlink(hermesA, hermesAlias, "dir");
+        });
+
+        for (const [hermesHome, rows] of [
+          [
+            hermesA,
+            [
+              ["session-a", 5, 1_788_256_805],
+              ["session-a", 11, 1_788_343_205],
+            ],
+          ],
+          [hermesB, [["session-b", 7, 1_788_256_905]]],
+        ] as const) {
+          const db = new NodeSqlite.DatabaseSync(NodePath.join(hermesHome, "state.db"));
+          db.exec(`
+          CREATE TABLE usage_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL, model TEXT NOT NULL,
+            billing_provider TEXT NOT NULL DEFAULT '', billing_base_url TEXT NOT NULL DEFAULT '',
+            billing_mode TEXT NOT NULL DEFAULT '', task TEXT NOT NULL DEFAULT '',
+            api_call_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0, actual_cost_usd REAL NOT NULL DEFAULT 0,
+            cost_status TEXT, cost_source TEXT, occurred_at REAL NOT NULL
+          );
+        `);
+          const insert = db.prepare(`
+          INSERT INTO usage_events (
+            session_id, model, output_tokens, api_call_count, occurred_at
+          ) VALUES (?, 'gpt-5.6-sol', ?, 1, ?)
+        `);
+          for (const row of rows) insert.run(...row);
+          db.close();
+        }
+
+        const settings: Parameters<typeof ServerSettings.layerTest>[0] = {
+          ...baseSettings,
+          providerInstances: {
+            [ProviderInstanceId.make("hermes_primary")]: {
+              driver: "hermes",
+              enabled: true,
+              environment: [{ name: "HERMES_HOME", value: hermesA }],
+              config: {},
+            },
+            [ProviderInstanceId.make("hermes_duplicate")]: {
+              driver: "hermes",
+              enabled: true,
+              environment: [{ name: "HERMES_HOME", value: hermesAlias }],
+              config: {},
+            },
+            [ProviderInstanceId.make("hermes_secondary")]: {
+              driver: "hermes",
+              enabled: true,
+              environment: [{ name: "HERMES_HOME", value: hermesB }],
+              config: {},
+            },
+            [ProviderInstanceId.make("hermes_missing")]: {
+              driver: "hermes",
+              enabled: true,
+              environment: [{ name: "HERMES_HOME", value: missingHermes }],
+              config: {},
+            },
+          },
+        };
+        const service = yield* UsageService.make.pipe(
+          Effect.provide(
+            serviceLayers({
+              prefix: "usage-service-hermes-homes-test",
+              home,
+              settings,
+              hostEnvironment: { HERMES_HOME: NodePath.join(home, "process-global-hermes") },
+            }),
+          ),
+        );
+
+        const daily = yield* service.readSummary({
+          timeZone: "UTC",
+          sinceDay: UsageDay.make("2026-09-01"),
+          untilDay: UsageDay.make("2026-09-02"),
+        });
+        assert.strictEqual(totalOutputTokens(daily), 23);
+        const hermesSources = daily.sources.filter(
+          (source) => source.fingerprint.provider === "hermes",
+        );
+        assert.strictEqual(hermesSources.length, 3);
+        assert.strictEqual(hermesSources.filter((source) => source.status === "missing").length, 1);
+
+        const hourly = yield* service.readSummary({
+          timeZone: "UTC",
+          sinceDay: UsageDay.make("2026-09-01"),
+          untilDay: UsageDay.make("2026-09-01"),
+          resolution: "hour",
+          sinceTime: "2026-09-01T09:00:00Z",
+          untilTime: "2026-09-01T11:00:00Z",
+        });
+        assert.strictEqual(totalOutputTokens(hourly), 12);
+      }).pipe(Effect.scoped),
   );
 
   it.live("does not orphan an in-flight scan when its first caller is interrupted", () =>

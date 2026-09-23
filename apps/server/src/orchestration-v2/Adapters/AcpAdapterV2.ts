@@ -610,6 +610,10 @@ function acpMcpServers(threadId: ThreadId | null): ReadonlyArray<EffectAcpSchema
           name: "Authorization",
           value: session.authorizationHeader,
         },
+        {
+          name: "MCP-Protocol-Version",
+          value: "2025-06-18",
+        },
       ],
     },
   ];

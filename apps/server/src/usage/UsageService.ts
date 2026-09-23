@@ -16,6 +16,7 @@ import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
+  resolveProviderInstanceEnabled,
   type ServerSettings as ServerSettingsValue,
   type UsageProviderKind,
   type UsageSource,
@@ -44,7 +45,9 @@ import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
+import { readHermesUsageRecords } from "./hermesUsageDatabase.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
@@ -259,8 +262,37 @@ export const make = Effect.gen(function* () {
       grokHomeEnv.length > 0
         ? path.resolve(expandHomePath(grokHomeEnv))
         : path.join(NodeOS.homedir(), ".grok");
+    const hermesHomes = new Set<string>();
+    for (const instance of Object.values(settings.providerInstances)) {
+      if (instance.driver !== "hermes" || !resolveProviderInstanceEnabled(instance)) continue;
+      const instanceEnvironment = mergeProviderInstanceEnvironment(
+        instance.environment,
+        hostEnvironment,
+      );
+      const hermesHomeEnv = instanceEnvironment["HERMES_HOME"]?.trim() ?? "";
+      const hermesHome =
+        hermesHomeEnv.length > 0
+          ? path.resolve(expandHomePath(hermesHomeEnv))
+          : path.join(NodeOS.homedir(), ".hermes");
+      hermesHomes.add(path.normalize(hermesHome));
+    }
+    if (hermesHomes.size === 0) {
+      const hermesHomeEnv = hostEnvironment["HERMES_HOME"]?.trim() ?? "";
+      hermesHomes.add(
+        path.normalize(
+          hermesHomeEnv.length > 0
+            ? path.resolve(expandHomePath(hermesHomeEnv))
+            : path.join(NodeOS.homedir(), ".hermes"),
+        ),
+      );
+    }
 
-    return [
+    const dirs: Array<{
+      readonly provider: UsageProviderKind;
+      readonly dir: string;
+      readonly fileName?: string;
+      readonly stateDbPath?: string;
+    }> = [
       { provider: "claude" as const, dir: claudeDir },
       { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
       {
@@ -268,7 +300,13 @@ export const make = Effect.gen(function* () {
         dir: path.join(grokHome, "sessions"),
         fileName: "updates.jsonl",
       },
+      ...[...hermesHomes].map((hermesHome) => ({
+        provider: "hermes" as const,
+        dir: hermesHome,
+        stateDbPath: path.join(hermesHome, "state.db"),
+      })),
     ];
+    return dirs;
   });
 
   /**
@@ -388,13 +426,24 @@ export const make = Effect.gen(function* () {
       Effect.provideService(Path.Path, path),
     );
     const scanned: ScannedDir[] = [];
-    for (const { provider, dir, fileName } of dirs) {
+    const scannedHermesStores = new Set<string>();
+    for (const { provider, dir, fileName, stateDbPath } of dirs) {
       const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
       const exists = yield* fileSystem
-        .exists(dir)
+        .exists(stateDbPath ?? dir)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
       if (!exists) {
         scanned.push({ provider, dir, volumeId, files: null });
+        continue;
+      }
+      if (stateDbPath !== undefined) {
+        const storeId = yield* Effect.promise(() => readDirectoryVolumeId(stateDbPath));
+        if (scannedHermesStores.has(storeId)) continue;
+        scannedHermesStores.add(storeId);
+        const records = yield* Effect.sync(() =>
+          readHermesUsageRecords(stateDbPath, windowStartMs, storeId),
+        );
+        scanned.push({ provider, dir, volumeId, files: [{ path: stateDbPath, records }] });
         continue;
       }
       const files = yield* Effect.promise(() =>

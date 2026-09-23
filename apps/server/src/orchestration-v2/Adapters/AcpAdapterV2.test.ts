@@ -1269,7 +1269,10 @@ describe("AcpAdapterV2", () => {
             type: "http",
             name: "t3-code",
             url: "http://127.0.0.1:43123/mcp",
-            headers: [{ name: "Authorization", value: "Bearer target-thread-token" }],
+            headers: [
+              { name: "Authorization", value: "Bearer target-thread-token" },
+              { name: "MCP-Protocol-Version", value: "2025-06-18" },
+            ],
           },
         ],
       });
