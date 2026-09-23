@@ -27,6 +27,7 @@ import {
   type ProviderUserInputAnswers,
   type RuntimeRequestId,
   type ThreadId,
+  type TurnTokenUsage,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
@@ -174,6 +175,30 @@ export const acpRootTurnSettleDebounceMs = 2_000;
 /** Let trailing root session chunks land before terminalizing a settled turn. */
 export const acpRootTurnCompletionDrainMs = 100;
 
+export function acpPromptResponseTurnTokenUsage(
+  usage: EffectAcpSchema.Usage | null | undefined,
+  hasSubagents: boolean,
+  terminalStatus: OrchestrationV2ProviderTurn["status"],
+): TurnTokenUsage {
+  if (usage == null) {
+    return {
+      usageScope: "main_agent",
+      usageStatus: "unavailable",
+      hasSubagents,
+    };
+  }
+  return {
+    usageScope: "main_agent",
+    usageStatus: terminalStatus === "completed" ? "complete" : "partial",
+    hasSubagents,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(usage.cachedReadTokens == null ? {} : { cachedInputTokens: usage.cachedReadTokens }),
+    ...(usage.cachedWriteTokens == null ? {} : { cacheCreationTokens: usage.cachedWriteTokens }),
+    ...(usage.thoughtTokens == null ? {} : { reasoningTokens: usage.thoughtTokens }),
+  };
+}
+
 /**
  * True when root-session streaming is quiescent enough for speculative settle.
  *
@@ -222,6 +247,8 @@ export interface AcpAdapterV2Flavor {
     readonly startResult: AcpSessionRuntimeStartResult;
     readonly modelSelection: ModelSelection;
   }) => Effect.Effect<string | undefined, EffectAcpErrors.AcpError>;
+  /** Model option ids consumed by applyModelSelection instead of ACP session config options. */
+  readonly modelSelectionOptionIdsHandledByFlavor?: ReadonlySet<string>;
   /** Native session mode to select for a runtime policy (e.g. Antigravity `yolo`). */
   readonly sessionModeForPolicy?: (policy: ProviderAdapterV2RuntimePolicy) => string | undefined;
   /**
@@ -1142,6 +1169,7 @@ interface ActiveAcpTurn {
    * complete this; settled-soft classification ORs it with `promptSettled`.
    */
   readonly promptWireSettled: Deferred.Deferred<void, never>;
+  promptUsage: EffectAcpSchema.Usage | undefined;
   backgroundFinalizeGeneration: number;
 }
 
@@ -4846,7 +4874,11 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           const availableConfigIds = new Set(configOptions.map((option) => option.id));
           const unsupportedConfigIds = (modelSelection.options ?? [])
             .map((selection) => selection.id)
-            .filter((id) => !availableConfigIds.has(id));
+            .filter(
+              (id) =>
+                !availableConfigIds.has(id) &&
+                !flavor.modelSelectionOptionIdsHandledByFlavor?.has(id),
+            );
           if (unsupportedConfigIds.length > 0) {
             return yield* new ProviderAdapterProtocolError({
               driver,
@@ -4854,6 +4886,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             });
           }
           for (const selection of modelSelection.options ?? []) {
+            if (flavor.modelSelectionOptionIdsHandledByFlavor?.has(selection.id)) continue;
             yield* runtime.setConfigOption(selection.id, selection.value);
           }
           const policyMode = flavor.sessionModeForPolicy?.(runtimePolicy);
@@ -4903,6 +4936,11 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           status,
           startedAt: context.startedAt,
           completedAt,
+          turnTokenUsage: acpPromptResponseTurnTokenUsage(
+            context.promptUsage,
+            context.subagents.size > 0,
+            status,
+          ),
         });
 
         const drainTrailingRootTurnChunks = Effect.fnUntraced(function* () {
@@ -5431,6 +5469,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               promptSettled: false,
               promptSettledStatus: null,
               promptWireSettled,
+              promptUsage: undefined,
               backgroundFinalizeGeneration: 0,
             };
             const carryover = yield* Ref.getAndSet(carryoverSubagents, null);
@@ -5557,6 +5596,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                   promptGeneration,
                   Effect.gen(function* () {
                     if (context.finalized) return;
+                    context.promptUsage = result.usage ?? undefined;
                     const status =
                       result.stopReason === "cancelled"
                         ? context.interrupted

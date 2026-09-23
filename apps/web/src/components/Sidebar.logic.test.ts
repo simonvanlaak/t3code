@@ -48,7 +48,7 @@ import {
   sortSidebarV2ProjectGroups,
   sortThreadsForSidebar,
 } from "./Sidebar.logic";
-import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -847,7 +847,12 @@ describe("resolveSidebarThreadStatus", () => {
     updatedAt: "2026-03-09T10:00:00.000Z",
   };
 
-  const idle = { hasPendingApprovals: false, hasPendingUserInput: false, runtime: null };
+  const idle = {
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    pendingBackgroundTasks: [],
+    runtime: null,
+  };
 
   it("prioritizes approval over a running runtime", () => {
     expect(resolveSidebarThreadStatus({ ...idle, hasPendingApprovals: true, runtime })).toBe(
@@ -875,6 +880,18 @@ describe("resolveSidebarThreadStatus", () => {
       resolveSidebarThreadStatus({
         ...idle,
         runtime: { ...runtime, status: "starting" as const },
+      }),
+    ).toBe("working");
+  });
+
+  it("reports working while a subagent remains live after the root runtime parks", () => {
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        pendingBackgroundTasks: [
+          { taskId: "delegated-review", taskType: "subagent", description: "Review changes" },
+        ],
+        runtime: { ...runtime, status: "idle" as const },
       }),
     ).toBe("working");
   });
@@ -1121,53 +1138,44 @@ describe("sortSettledThreadsForSidebar", () => {
 });
 
 describe("resolveWorkingStartedAt", () => {
-  const runtime = {
-    status: "running" as const,
-    providerName: "Codex",
-    providerInstanceId: ProviderInstanceId.make("codex"),
-    activeRunId: RunId.make("run-1"),
-    lastError: null,
-    updatedAt: "2026-03-09T10:02:00.000Z",
-  };
-
-  it("uses the running run's start time", () => {
+  it("counts from the latest user interaction instead of run or subagent activity", () => {
     expect(
       resolveWorkingStartedAt({
+        latestUserMessageAt: "2026-03-09T09:55:00.000Z",
         latestRun: makeLatestRun({ completedAt: null }),
-        runtime,
+      }),
+    ).toBe("2026-03-09T09:55:00.000Z");
+  });
+
+  it("uses the request time when the user-message projection is not available yet", () => {
+    expect(
+      resolveWorkingStartedAt({
+        latestUserMessageAt: null,
+        latestRun: makeLatestRun({ startedAt: "2026-03-09T10:02:00.000Z", completedAt: null }),
       }),
     ).toBe("2026-03-09T10:00:00.000Z");
   });
 
-  it("uses the request time while a run awaits adoption", () => {
+  it("keeps the user interaction anchor after the root run completes while subagents work", () => {
     expect(
       resolveWorkingStartedAt({
-        latestRun: makeLatestRun({ startedAt: null, completedAt: null }),
-        runtime,
-      }),
-    ).toBe("2026-03-09T10:00:00.000Z");
-  });
-
-  it("falls back to the runtime transition when the latest run already completed", () => {
-    expect(
-      resolveWorkingStartedAt({
+        latestUserMessageAt: "2026-03-09T09:55:00.000Z",
         latestRun: makeLatestRun(),
-        runtime,
       }),
-    ).toBe("2026-03-09T10:02:00.000Z");
+    ).toBe("2026-03-09T09:55:00.000Z");
   });
 
-  it("skips a malformed startedAt instead of returning it", () => {
+  it("skips a malformed user-message timestamp and falls back to the request time", () => {
     expect(
       resolveWorkingStartedAt({
-        latestRun: makeLatestRun({ startedAt: "not-a-date", completedAt: null }),
-        runtime,
+        latestUserMessageAt: "not-a-date",
+        latestRun: makeLatestRun(),
       }),
     ).toBe("2026-03-09T10:00:00.000Z");
   });
 
-  it("returns null with neither a running run nor a runtime", () => {
-    expect(resolveWorkingStartedAt({ latestRun: null, runtime: null })).toBeNull();
+  it("returns null without a user interaction or run request", () => {
+    expect(resolveWorkingStartedAt({ latestUserMessageAt: null, latestRun: null })).toBeNull();
   });
 });
 

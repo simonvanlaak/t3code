@@ -13,7 +13,7 @@ import {
   resolveSettledThreadTimestamp,
   sortPinnedThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
-import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { classifyTaskAgentKind, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
 
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 
@@ -149,13 +149,23 @@ export function threadHasUnseenCompletion(
 }
 
 export function resolveThreadListV2Status(
-  thread: Pick<EnvironmentThreadShell, "hasPendingApprovals" | "hasPendingUserInput" | "runtime">,
+  thread: Pick<
+    EnvironmentThreadShell,
+    "hasPendingApprovals" | "hasPendingUserInput" | "pendingBackgroundTasks" | "runtime"
+  >,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals) {
     return "approval";
   }
   if (thread.hasPendingUserInput) {
     return "input";
+  }
+  if (
+    thread.pendingBackgroundTasks.some(
+      (task) => classifyTaskAgentKind({ taskType: task.taskType }) === "agent",
+    )
+  ) {
+    return "working";
   }
   if (
     thread.runtime !== null &&

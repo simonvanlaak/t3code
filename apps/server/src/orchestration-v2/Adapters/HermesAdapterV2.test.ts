@@ -3,11 +3,17 @@ import * as Effect from "effect/Effect";
 
 import {
   HermesProviderCapabilitiesV2,
+  HERMES_PROVIDER,
   makeHermesAcpAdapterFlavor,
   type HermesAdapterV2Options,
 } from "./HermesAdapterV2.ts";
+import { isBuiltInProviderAdapterDriverV2 } from "../builtInProviderAdapterDrivers.ts";
 
 describe("HermesAdapterV2", () => {
+  it("registers Hermes as a built-in V2 adapter driver", () => {
+    assert.isTrue(isBuiltInProviderAdapterDriverV2(HERMES_PROVIDER));
+  });
+
   it("advertises native subagent lifecycle and model switching", () => {
     assert.isTrue(HermesProviderCapabilitiesV2.subagents.supportsSubagents);
     assert.isTrue(HermesProviderCapabilitiesV2.subagents.exposesSubagentThreadIds);
@@ -37,5 +43,6 @@ describe("HermesAdapterV2", () => {
     assert.equal(update?.nativeTaskId, "child-1");
     assert.equal(update?.childSessionId, "session-child-1");
     assert.equal(update?.status, "completed");
+    assert.isTrue(flavor.modelSelectionOptionIdsHandledByFlavor?.has("reasoningEffort"));
   });
 });

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
-import type { ContextMenuItem } from "@t3tools/contracts";
+import { classifyTaskAgentKind, type ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
   activeThreadAnchorTimestampMs,
@@ -610,7 +610,7 @@ export function shouldRecedeSidebarThread(input: {
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
+  "hasPendingApprovals" | "hasPendingUserInput" | "pendingBackgroundTasks" | "runtime"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
@@ -619,6 +619,13 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   }
   if (thread.hasPendingUserInput) {
     return "input";
+  }
+  if (
+    (thread.pendingBackgroundTasks ?? []).some(
+      (task) => classifyTaskAgentKind({ taskType: task.taskType }) === "agent",
+    )
+  ) {
+    return "working";
   }
   if (
     thread.runtime !== null &&
@@ -831,18 +838,13 @@ export function sortSettledThreadsForSidebar<
   );
 }
 
-/** The timestamp a working thread's elapsed label counts from: the running
-    turn's start (request time until adoption), falling back to the session's
-    last transition when the turn projection lags behind. Malformed
-    timestamps fall through to the next candidate, not just missing ones. */
+/** The working counter measures time since the user's latest interaction.
+    Runtime and run-start timestamps can change later as the root agent or its
+    subagents transition, so they must never move this anchor forward. */
 export function resolveWorkingStartedAt(
-  thread: Pick<SidebarThreadSummary, "latestRun" | "runtime">,
+  thread: Pick<SidebarThreadSummary, "latestRun" | "latestUserMessageAt">,
 ): string | null {
-  const run = thread.latestRun;
-  if (run && run.completedAt === null) {
-    return firstValidTimestamp(run.startedAt, run.requestedAt, thread.runtime?.updatedAt);
-  }
-  return firstValidTimestamp(thread.runtime?.updatedAt);
+  return firstValidTimestamp(thread.latestUserMessageAt, thread.latestRun?.requestedAt);
 }
 
 export function formatWorkingDurationLabel(elapsedMs: number): string {

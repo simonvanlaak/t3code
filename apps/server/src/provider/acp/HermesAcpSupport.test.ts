@@ -20,6 +20,7 @@ describe("buildHermesAcpSpawnInput", () => {
       cwd: "/tmp/project",
       env: {
         PATH: "/usr/bin",
+        HERMES_ACP_DISABLE_NATIVE_DELEGATION: "1",
       },
     });
   });
@@ -34,12 +35,23 @@ describe("buildHermesAcpSpawnInput", () => {
     expect(spawn.command).toBe("hermes");
   });
 
-  it("omits env entirely when no environment is provided", () => {
+  it("overrides an inherited request to keep native delegation enabled", () => {
+    const spawn = buildHermesAcpSpawnInput({ binaryPath: "/opt/hermes" }, "/tmp/project", {
+      HERMES_ACP_DISABLE_NATIVE_DELEGATION: "0",
+    });
+
+    expect(spawn.env?.HERMES_ACP_DISABLE_NATIVE_DELEGATION).toBe("1");
+  });
+
+  it("sets the T3-owned delegation guard when no environment is provided", () => {
     const spawn = buildHermesAcpSpawnInput({ binaryPath: "/opt/hermes" }, "/tmp/project");
     expect(spawn).toEqual({
       command: "/opt/hermes",
       args: ["acp"],
       cwd: "/tmp/project",
+      env: {
+        HERMES_ACP_DISABLE_NATIVE_DELEGATION: "1",
+      },
     });
   });
 });

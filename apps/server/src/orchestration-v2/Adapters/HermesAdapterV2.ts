@@ -99,6 +99,7 @@ export function makeHermesAcpAdapterFlavor(options: HermesAdapterV2Options): Acp
         reasoningEffort: getModelSelectionStringOptionValue(modelSelection, "reasoningEffort"),
         mapError: ({ cause }) => cause,
       }).pipe(Effect.as(modelSelection.model)),
+    modelSelectionOptionIdsHandledByFlavor: new Set(["reasoningEffort"]),
     extractSubagentUpdate: extractHermesAcpSubagentUpdate,
     ...(options.assertComplete === undefined ? {} : { assertComplete: options.assertComplete }),
   };

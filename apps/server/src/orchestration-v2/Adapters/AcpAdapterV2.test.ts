@@ -65,6 +65,7 @@ import {
 import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
 import {
   AcpProviderCapabilitiesV2,
+  acpPromptResponseTurnTokenUsage,
   acpCarryoverTerminalShouldClearContinuation,
   acpCanonicalJson,
   acpClaimNativeTransportRequest,
@@ -91,6 +92,64 @@ const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
 const testLayer = Layer.mergeAll(NodeServices.layer, idAllocatorLayer, serverConfigLayer);
 const ACP_TEST_DRIVER = ProviderDriverKind.make("acp-test");
 const decodeUnknownJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
+describe("acpPromptResponseTurnTokenUsage", () => {
+  it("projects ACP prompt usage into complete main-agent turn usage", () => {
+    assert.deepEqual(
+      acpPromptResponseTurnTokenUsage(
+        {
+          inputTokens: 60,
+          outputTokens: 15,
+          totalTokens: 75,
+          cachedReadTokens: 40,
+          cachedWriteTokens: 1,
+          thoughtTokens: 4,
+        },
+        true,
+        "completed",
+      ),
+      {
+        usageScope: "main_agent",
+        usageStatus: "complete",
+        hasSubagents: true,
+        inputTokens: 60,
+        outputTokens: 15,
+        cachedInputTokens: 40,
+        cacheCreationTokens: 1,
+        reasoningTokens: 4,
+      },
+    );
+  });
+
+  it("returns unavailable usage when ACP omits prompt usage", () => {
+    assert.deepEqual(acpPromptResponseTurnTokenUsage(undefined, false, "failed"), {
+      usageScope: "main_agent",
+      usageStatus: "unavailable",
+      hasSubagents: false,
+    });
+  });
+
+  it("marks observed usage partial when the turn does not complete", () => {
+    assert.deepEqual(
+      acpPromptResponseTurnTokenUsage(
+        {
+          inputTokens: 60,
+          outputTokens: 15,
+          totalTokens: 75,
+        },
+        false,
+        "interrupted",
+      ),
+      {
+        usageScope: "main_agent",
+        usageStatus: "partial",
+        hasSubagents: false,
+        inputTokens: 60,
+        outputTokens: 15,
+      },
+    );
+  });
+});
 
 function permissionRequest(
   kind: NonNullable<EffectAcpSchema.RequestPermissionRequest["toolCall"]["kind"]>,

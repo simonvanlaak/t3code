@@ -35,7 +35,10 @@ export function buildHermesAcpSpawnInput(
     command: hermesSettings?.binaryPath || "hermes",
     args: ["acp"],
     cwd,
-    ...(environment ? { env: environment } : {}),
+    env: {
+      ...environment,
+      HERMES_ACP_DISABLE_NATIVE_DELEGATION: "1",
+    },
   };
 }
 

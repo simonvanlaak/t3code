@@ -134,13 +134,15 @@ describe("resolveThreadListV2Status", () => {
     expect(resolveThreadListV2Status(thread)).toBe("approval");
   });
 
-  it("reports waiting when presentation parks runtime idle for background tasks", () => {
+  it("reports waiting when presentation parks runtime idle for monitor work", () => {
     expect(
       resolveThreadListV2Status(
         makeThread({
           id: ThreadId.make("t"),
           title: "t",
-          pendingBackgroundTasks: [{ taskId: "bg-1", description: "Run Codex review" }],
+          pendingBackgroundTasks: [
+            { taskId: "bg-1", taskType: "local_bash", description: "Run Codex review" },
+          ],
           runtime: {
             status: "idle",
             activeRunId: null,
@@ -152,6 +154,28 @@ describe("resolveThreadListV2Status", () => {
         }),
       ),
     ).toBe("waiting");
+  });
+
+  it("reports working while a subagent remains live after the root runtime parks", () => {
+    expect(
+      resolveThreadListV2Status(
+        makeThread({
+          id: ThreadId.make("t"),
+          title: "t",
+          pendingBackgroundTasks: [
+            { taskId: "delegated-review", taskType: "subagent", description: "Review changes" },
+          ],
+          runtime: {
+            status: "idle",
+            activeRunId: null,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerName: "Codex",
+            lastError: null,
+            updatedAt: NOW,
+          },
+        }),
+      ),
+    ).toBe("working");
   });
 
   it("resolves ready for quiescent threads", () => {
