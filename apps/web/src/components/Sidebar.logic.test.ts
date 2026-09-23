@@ -28,6 +28,7 @@ import {
   resolveAdjacentThreadId,
   resolveProjectStatusIndicator,
   resolveSidebarStageBadgeLabel,
+  resolveSidebarThreadSection,
   resolveSidebarThreadStatus,
   resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
@@ -374,6 +375,35 @@ describe("sidebar thread lineage helpers", () => {
     expect(getSidebarForkParentThreadId(runFork)).toBe(parentId);
     expect(getSidebarForkParentThreadId(lineageFork)).toBe(fallbackParentId);
     expect(getSidebarForkParentThreadId(makeThreadFixture())).toBeNull();
+  });
+});
+
+describe("resolveSidebarThreadSection", () => {
+  it("puts pinned active threads in the pinned section", () => {
+    expect(
+      resolveSidebarThreadSection({
+        isPinned: true,
+        isSettled: false,
+        isSnoozed: false,
+      }),
+    ).toBe("pinned");
+  });
+
+  it("keeps snoozed and settled threads in their lifecycle shelves", () => {
+    expect(
+      resolveSidebarThreadSection({
+        isPinned: true,
+        isSettled: true,
+        isSnoozed: true,
+      }),
+    ).toBe("snoozed");
+    expect(
+      resolveSidebarThreadSection({
+        isPinned: true,
+        isSettled: true,
+        isSnoozed: false,
+      }),
+    ).toBe("settled");
   });
 });
 

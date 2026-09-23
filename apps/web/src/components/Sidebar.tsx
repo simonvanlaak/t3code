@@ -144,6 +144,7 @@ import {
   planPinnedReorder,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
+  resolveSidebarThreadSection,
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
   shouldCreateNewThreadInCurrentProject,
@@ -2256,13 +2257,24 @@ export default function Sidebar() {
         serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSettlement === true;
       const supportsSnooze =
         serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSnooze === true;
-      // Snooze outranks settlement and pinning until the thread wakes.
-      if (supportsSnooze && effectiveSnoozed(thread, { now: preciseNow })) {
-        snoozed.push(thread);
-      } else if (supportsSettlement && thread.settledOverride === "settled") {
-        settled.push(thread);
-      } else {
-        active.push(thread);
+      const section = resolveSidebarThreadSection({
+        isSnoozed: supportsSnooze && effectiveSnoozed(thread, { now: preciseNow }),
+        isSettled: supportsSettlement && thread.settledOverride === "settled",
+        isPinned: thread.pinnedAt != null,
+      });
+      switch (section) {
+        case "pinned":
+          pinned.push(thread);
+          break;
+        case "active":
+          active.push(thread);
+          break;
+        case "snoozed":
+          snoozed.push(thread);
+          break;
+        case "settled":
+          settled.push(thread);
+          break;
       }
     }
     // One shared rule on every platform (see sortPinnedThreadsByOrderKey):

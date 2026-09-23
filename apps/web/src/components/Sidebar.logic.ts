@@ -177,6 +177,19 @@ export function filterSidebarV2VisibleThreads<
   );
 }
 
+export type SidebarThreadSection = "pinned" | "active" | "snoozed" | "settled";
+
+export function resolveSidebarThreadSection(input: {
+  readonly isPinned: boolean;
+  readonly isSettled: boolean;
+  readonly isSnoozed: boolean;
+}): SidebarThreadSection {
+  if (input.isSnoozed) return "snoozed";
+  if (input.isSettled) return "settled";
+  if (input.isPinned) return "pinned";
+  return "active";
+}
+
 export function getSidebarForkParentThreadId(
   thread: Pick<SidebarThreadSummary, "forkedFrom" | "lineage">,
 ) {
