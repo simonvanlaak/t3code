@@ -144,6 +144,92 @@ describe("collectLimitsGroups", () => {
       "Desktop",
     ]);
   });
+
+  it("keeps distinct Hermes credential-pool subscriptions separate", () => {
+    const hermes = provider({
+      instanceId: ProviderInstanceId.make("hermes"),
+      driver: ProviderDriverKind.make("hermes"),
+      usageAccounts: [
+        {
+          id: "active",
+          label: "device_code",
+          plan: "Pro",
+          usageLimits: {
+            checkedAt: "2026-09-24T14:00:00.000Z",
+            windows: [{ ...window, usedPercent: 97, resetsAt: "2026-09-25T10:39:27Z" }],
+          },
+        },
+        {
+          id: "other",
+          label: "person@example.com",
+          email: "person@example.com",
+          plan: "Pro",
+          usageLimits: {
+            checkedAt: "2026-09-24T14:00:00.000Z",
+            windows: [{ ...window, usedPercent: 0, resetsAt: "2026-10-01T12:39:57Z" }],
+          },
+        },
+      ],
+    });
+    const groups = collectLimitsGroups(
+      new Map([
+        [
+          "env-a",
+          { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [hermes] } },
+        ],
+      ]) as never,
+    );
+    expect(groups.flatMap((group) => group.providers)).toMatchObject([
+      { displayName: "device_code", usageLimits: { windows: [{ usedPercent: 97 }] } },
+      { auth: { email: "person@example.com" }, usageLimits: { windows: [{ usedPercent: 0 }] } },
+    ]);
+  });
+
+  it("merges the same unlabeled Hermes subscription across environments by reset schedule", () => {
+    const hermes = (id: string, label: string, email: string | undefined, usedPercent: number) =>
+      provider({
+        instanceId: ProviderInstanceId.make("hermes"),
+        driver: ProviderDriverKind.make("hermes"),
+        usageAccounts: [
+          {
+            id,
+            label,
+            ...(email ? { email } : {}),
+            plan: "Pro",
+            usageLimits: {
+              checkedAt: `2026-09-24T14:${usedPercent}:00.000Z`,
+              windows: [{ ...window, usedPercent, resetsAt: "2026-09-25T10:39:27+00:00" }],
+            },
+          },
+        ],
+      });
+    const groups = collectLimitsGroups(
+      new Map([
+        [
+          "env-a",
+          {
+            entry: { target: { label: "Laptop" } },
+            serverConfig: { providers: [hermes("x1-active", "device_code", undefined, 56)] },
+          },
+        ],
+        [
+          "env-b",
+          {
+            entry: { target: { label: "Clanker" } },
+            serverConfig: {
+              providers: [hermes("clanker-active", "person@example.com", "person@example.com", 57)],
+            },
+          },
+        ],
+      ]) as never,
+    );
+    expect(groups.flatMap((group) => group.providers)).toMatchObject([
+      {
+        auth: { email: "person@example.com" },
+        usageLimits: { windows: [{ usedPercent: 57 }] },
+      },
+    ]);
+  });
 });
 
 describe("collectLimitSources", () => {

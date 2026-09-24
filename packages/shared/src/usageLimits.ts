@@ -32,7 +32,7 @@ export function providersWithLimits(
       provider.enabled &&
       provider.installed &&
       isProviderAvailable(provider) &&
-      provider.usageLimits !== undefined,
+      (provider.usageLimits !== undefined || (provider.usageAccounts?.length ?? 0) > 0),
   );
 }
 
@@ -57,13 +57,83 @@ export function collectLimitsGroups(
     }
   >,
 ): readonly LimitsGroup[] {
-  const groups: LimitsGroup[] = [];
+  const groups = new Map<EnvironmentId, LimitsGroup>();
+  const accountOwners = new Map<
+    string,
+    { readonly environmentId: EnvironmentId; readonly provider: ServerProvider }
+  >();
+
   for (const [environmentId, presentation] of presentations) {
-    const providers = providersWithLimits(presentation.serverConfig?.providers ?? []);
+    const providers: ServerProvider[] = [];
+    for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
+      if (!provider.usageAccounts?.length) {
+        providers.push(provider);
+        continue;
+      }
+      for (const account of provider.usageAccounts) {
+        const fallbackKey = `${environmentId}:${provider.instanceId}:${account.id}`;
+        const identityKey = accountKey(
+          provider.driver,
+          account.email,
+          account.plan,
+          account.usageLimits,
+        );
+        const sameIdentity = identityKey ? accountOwners.get(identityKey) : undefined;
+        const key =
+          sameIdentity?.environmentId === environmentId
+            ? fallbackKey
+            : (identityKey ?? fallbackKey);
+        const synthetic: ServerProvider = {
+          ...provider,
+          displayName: account.email ? provider.displayName : account.label,
+          auth: {
+            ...provider.auth,
+            ...(account.plan ? { label: account.plan } : {}),
+            email: account.email,
+          },
+          usageLimits: account.usageLimits,
+          usageAccounts: [],
+        };
+        const owner = accountOwners.get(key);
+        if (!owner) {
+          providers.push(synthetic);
+          accountOwners.set(key, { environmentId, provider: synthetic });
+          continue;
+        }
+        const fresher =
+          Date.parse(account.usageLimits.checkedAt) >
+          Date.parse(owner.provider.usageLimits?.checkedAt ?? "");
+        const merged: ServerProvider = {
+          ...(fresher ? synthetic : owner.provider),
+          displayName: owner.provider.displayName ?? synthetic.displayName,
+          auth: {
+            ...(fresher ? synthetic.auth : owner.provider.auth),
+            email: owner.provider.auth.email ?? synthetic.auth.email,
+            label: owner.provider.auth.label ?? synthetic.auth.label,
+          },
+        };
+        const ownerGroup = groups.get(owner.environmentId);
+        if (ownerGroup) {
+          groups.set(owner.environmentId, {
+            ...ownerGroup,
+            providers: ownerGroup.providers.map((candidate) =>
+              candidate === owner.provider ? merged : candidate,
+            ),
+          });
+        }
+        accountOwners.set(key, { environmentId: owner.environmentId, provider: merged });
+      }
+    }
     if (providers.length === 0) continue;
-    groups.push({ environmentId, environmentLabel: presentation.entry.target.label, providers });
+    groups.set(environmentId, {
+      environmentId,
+      environmentLabel: presentation.entry.target.label,
+      providers,
+    });
   }
-  return groups.length > 1 ? groups : groups.map((group) => ({ ...group, environmentLabel: null }));
+
+  const result = [...groups.values()];
+  return result.length > 1 ? result : result.map((group) => ({ ...group, environmentLabel: null }));
 }
 
 /**
@@ -137,7 +207,24 @@ export function collectLimitSources(
   );
 }
 
-function accountKey(driver: ServerProvider["driver"], email: string | undefined): string | null {
+function accountKey(
+  driver: ServerProvider["driver"],
+  email: string | undefined,
+  plan?: string,
+  limits?: ServerProviderUsageLimits,
+): string | null {
+  if (driver === "hermes" && limits) {
+    const schedule = limits.windows.flatMap((window) => {
+      if (!window.resetsAt) return [];
+      const resetsAt = Date.parse(window.resetsAt);
+      return Number.isFinite(resetsAt)
+        ? [`${window.kind}:${window.windowDurationMins ?? ""}:${resetsAt}`]
+        : [];
+    });
+    if (schedule.length > 0) {
+      return `${driver}:schedule:${plan?.trim().toLowerCase() ?? ""}:${schedule.sort().join("|")}`;
+    }
+  }
   const normalizedEmail = email?.trim().toLowerCase();
   return normalizedEmail ? `${driver}:${normalizedEmail}` : null;
 }

@@ -58,6 +58,16 @@ export const ServerProviderUsageLimits = Schema.Struct({
 });
 export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
 
+/** One credential-pool account reported by a provider instance. */
+export const ServerProviderUsageAccount = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  label: TrimmedNonEmptyString,
+  email: Schema.optional(TrimmedNonEmptyString),
+  plan: Schema.optional(TrimmedNonEmptyString),
+  usageLimits: ServerProviderUsageLimits,
+});
+export type ServerProviderUsageAccount = typeof ServerProviderUsageAccount.Type;
+
 /**
  * What an adapter reports when its runtime pushes a rate-limit update during
  * a turn. Sparse by contract: Claude's `rate_limit_event` names one window at

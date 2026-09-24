@@ -11,6 +11,7 @@ import type {
   ServerProviderModel,
   ServerProviderSkill,
   ServerProviderState,
+  ServerProviderUsageAccount,
   ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -317,6 +318,43 @@ export function parseHermesUsageLimits(
   };
 }
 
+export function parseHermesUsageAccounts(
+  stdout: string,
+  fallbackCheckedAt: string,
+): ReadonlyArray<ServerProviderUsageAccount> {
+  const jsonStart = stdout.indexOf("{");
+  if (jsonStart < 0) return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout.slice(jsonStart));
+  } catch {
+    return [];
+  }
+  if (typeof value !== "object" || value === null) return [];
+  const entries = (value as Record<string, unknown>).accounts;
+  if (!Array.isArray(entries)) return [];
+  return entries.flatMap((entry): ReadonlyArray<ServerProviderUsageAccount> => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const record = entry as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    const label = typeof record.label === "string" ? record.label.trim() : "";
+    if (!id || !label || typeof record.usage !== "object" || record.usage === null) return [];
+    const usageLimits = parseHermesUsageLimits(JSON.stringify(record.usage), fallbackCheckedAt);
+    if (!usageLimits) return [];
+    const usage = record.usage as Record<string, unknown>;
+    const plan = typeof usage.plan === "string" ? usage.plan.trim() : "";
+    return [
+      {
+        id,
+        label,
+        ...(label.includes("@") ? { email: label } : {}),
+        ...(plan ? { plan } : {}),
+        usageLimits,
+      },
+    ];
+  });
+}
+
 const discoverHermesUsageLimits = (
   hermesSettings: Pick<HermesSettings, "binaryPath">,
   checkedAt: string,
@@ -324,9 +362,11 @@ const discoverHermesUsageLimits = (
 ) =>
   Effect.gen(function* () {
     const command = hermesSettings.binaryPath || "hermes";
-    const spawnCommand = yield* resolveSpawnCommand(command, ["usage", "--json"], {
-      env: environment,
-    });
+    const spawnCommand = yield* resolveSpawnCommand(
+      command,
+      ["usage", "--json", "--all-credentials"],
+      { env: environment },
+    );
     const result = yield* spawnAndCollect(
       command,
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -334,7 +374,9 @@ const discoverHermesUsageLimits = (
         shell: spawnCommand.shell,
       }),
     );
-    return result.code === 0 ? parseHermesUsageLimits(result.stdout, checkedAt) : undefined;
+    if (result.code !== 0) return { accounts: [] as const, primary: undefined };
+    const accounts = parseHermesUsageAccounts(result.stdout, checkedAt);
+    return { accounts, primary: accounts[0]?.usageLimits };
   });
 
 export function getHermesFallbackModels(
@@ -393,6 +435,7 @@ export function buildHermesProviderSnapshot(input: {
   readonly discoveredModels?: ReadonlyArray<ServerProviderModel>;
   readonly discoveredSkills?: ReadonlyArray<ServerProviderSkill>;
   readonly usageLimits?: ServerProviderUsageLimits;
+  readonly usageAccounts?: ReadonlyArray<ServerProviderUsageAccount>;
   readonly discoveryWarning?: string;
 }): ServerProviderDraft {
   const message = joinProviderMessages(input.parsed.message, input.discoveryWarning);
@@ -415,6 +458,7 @@ export function buildHermesProviderSnapshot(input: {
         input.discoveryWarning && input.parsed.status === "ready" ? "warning" : input.parsed.status,
       auth: input.parsed.auth,
       ...(input.usageLimits ? { usageLimits: input.usageLimits } : {}),
+      usageAccounts: input.usageAccounts ?? [],
       ...(message ? { message } : {}),
     },
   });
@@ -529,6 +573,7 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
   let discoveredModels = Option.none<ReadonlyArray<ServerProviderModel>>();
   let discoveredSkills: ReadonlyArray<ServerProviderSkill> = [];
   let usageLimits: ServerProviderUsageLimits | undefined;
+  let usageAccounts: ReadonlyArray<ServerProviderUsageAccount> = [];
   let discoveryWarning: string | undefined;
   if (parsed.status === "ready") {
     const discoveryExit = yield* Effect.exit(
@@ -555,7 +600,7 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
       Effect.map(Option.getOrElse(() => [] as const)),
       Effect.catch(() => Effect.succeed([] as const)),
     );
-    usageLimits = yield* discoverHermesUsageLimits(
+    const usage = yield* discoverHermesUsageLimits(
       hermesSettings,
       checkedAt,
       environment ?? process.env,
@@ -564,6 +609,8 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
       Effect.map(Option.getOrUndefined),
       Effect.catch(() => Effect.succeed(undefined)),
     );
+    usageLimits = usage?.primary;
+    usageAccounts = usage?.accounts ?? [];
   }
   return buildHermesProviderSnapshot({
     checkedAt,
@@ -575,6 +622,7 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
     ),
     discoveredSkills,
     ...(usageLimits ? { usageLimits } : {}),
+    usageAccounts,
     ...(discoveryWarning ? { discoveryWarning } : {}),
   });
 });

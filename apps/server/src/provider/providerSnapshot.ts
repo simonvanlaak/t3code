@@ -8,6 +8,7 @@ import type {
   ServerProviderSlashCommand,
   ServerProviderModel,
   ServerProviderState,
+  ServerProviderUsageAccount,
   ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -58,6 +59,7 @@ export interface ProviderProbeResult {
   readonly auth: ServerProviderAuth;
   readonly message?: string;
   readonly usageLimits?: ServerProviderUsageLimits;
+  readonly usageAccounts?: ReadonlyArray<ServerProviderUsageAccount>;
 }
 
 export interface ServerProviderPresentation {
@@ -262,6 +264,7 @@ export function buildServerProvider(input: {
     slashCommands: [...(input.slashCommands ?? [])],
     skills: [...(input.skills ?? [])],
     ...(input.probe.usageLimits ? { usageLimits: input.probe.usageLimits } : {}),
+    usageAccounts: [...(input.probe.usageAccounts ?? [])],
     ...(versionAdvisory ? { versionAdvisory } : {}),
   };
 }

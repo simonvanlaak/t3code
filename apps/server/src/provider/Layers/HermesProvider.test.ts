@@ -16,6 +16,7 @@ import {
   getHermesFallbackModels,
   parseHermesEnabledSkillNames,
   parseHermesCliVersion,
+  parseHermesUsageAccounts,
   parseHermesUsageLimits,
   parseHermesVersionOutput,
 } from "./HermesProvider.ts";
@@ -234,6 +235,37 @@ describe("Hermes CLI metadata", () => {
       ],
       resetCredits: { availableCount: 2 },
     });
+  });
+
+  it("maps every pooled Hermes credential to a separate usage account", () => {
+    const usage = (used: number, resetsAt: string) => ({
+      plan: "Pro",
+      fetched_at: "2026-09-24T14:11:17.136003+00:00",
+      windows: [{ label: "Weekly", used_percent: used, resets_at: resetsAt }],
+      details: [],
+    });
+    expect(
+      parseHermesUsageAccounts(
+        JSON.stringify({
+          accounts: [
+            {
+              id: "account-a",
+              label: "device_code",
+              usage: usage(97, "2026-09-25T10:39:27+00:00"),
+            },
+            {
+              id: "account-b",
+              label: "person@example.com",
+              usage: usage(0, "2026-10-01T12:39:57+00:00"),
+            },
+          ],
+        }),
+        "2026-09-24T14:00:00.000Z",
+      ),
+    ).toMatchObject([
+      { id: "account-a", label: "device_code", plan: "Pro" },
+      { id: "account-b", label: "person@example.com", email: "person@example.com", plan: "Pro" },
+    ]);
   });
 });
 
