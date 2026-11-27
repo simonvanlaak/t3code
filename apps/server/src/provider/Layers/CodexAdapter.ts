@@ -1021,6 +1021,7 @@ function mapItemLifecycle(
 
   return {
     ...runtimeEventBase(event, canonicalThreadId),
+    ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
     type: lifecycle,
     payload: {
       itemType,

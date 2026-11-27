@@ -254,11 +254,13 @@ export interface ProjectionSnapshotQueryShape {
    *
    * Activity payloads are projected for clients as they are read in small
    * sequential batches. Callers still apply the full snapshot projector for
-   * collection-level activity pruning.
+   * collection-level activity pruning. The receipt view projects directly from
+   * persisted lifecycle rows so start and completion observations both survive.
    */
   readonly getThreadDetailSnapshot: (
     threadId: ThreadId,
     window?: OrchestrationThreadDetailWindow,
+    activityView?: "client" | "commandReceipts",
   ) => Effect.Effect<Option.Option<OrchestrationThreadDetailSnapshot>, ProjectionRepositoryError>;
 }
 

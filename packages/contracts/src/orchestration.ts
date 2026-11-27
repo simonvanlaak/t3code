@@ -986,6 +986,50 @@ export const OrchestrationThreadDetailSnapshot = Schema.Struct({
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
 
+const codexReceiptIdentifierPattern = Schema.isPattern(/^[A-Za-z0-9_.:-]{1,256}$/u);
+const CodexReceiptIdentifier = Schema.String.check(codexReceiptIdentifierPattern);
+const CodexReceiptClock = Schema.Int.check(Schema.isGreaterThan(0));
+const CodexReceiptDuration = NonNegativeInt.check(
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+
+export const CodexExecutionReceipt = Schema.Struct({
+  receiptId: EventId.check(codexReceiptIdentifierPattern),
+  executor: Schema.Literals(["nativeCommand", "externalMcp", "externalDynamic"]),
+  lifecycle: Schema.Literals(["started", "completed"]),
+  providerInstanceId: Schema.optionalKey(ProviderInstanceId),
+  nativeThreadId: CodexReceiptIdentifier,
+  nativeTurnId: CodexReceiptIdentifier,
+  nativeItemId: CodexReceiptIdentifier,
+  source: Schema.optionalKey(
+    Schema.Literals(["agent", "userShell", "unifiedExecStartup", "unifiedExecInteraction"]),
+  ),
+  status: Schema.optionalKey(Schema.Literals(["inProgress", "completed", "failed", "declined"])),
+  processHandle: Schema.optionalKey(CodexReceiptIdentifier),
+  exitCode: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: -2147483648, maximum: 2147483647 })),
+  ),
+  durationMs: Schema.optionalKey(CodexReceiptDuration),
+  // These are provider item lifecycle clocks. Neither records an exact process start or exit.
+  notificationStartedAtMs: Schema.optionalKey(CodexReceiptClock),
+  notificationCompletedAtMs: Schema.optionalKey(CodexReceiptClock),
+  itemStartedAtMs: Schema.optionalKey(CodexReceiptClock),
+  itemCompletedAtMs: Schema.optionalKey(CodexReceiptClock),
+  t3ObservedAt: IsoDateTime.check(
+    Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u),
+  ),
+});
+export type CodexExecutionReceipt = typeof CodexExecutionReceipt.Type;
+
+export const OrchestrationThreadCommandReceiptPage = Schema.Struct({
+  threadId: ThreadId,
+  snapshotSequence: NonNegativeInt,
+  page: OrchestrationThreadDetailPage,
+  receipts: Schema.Array(CodexExecutionReceipt),
+});
+export type OrchestrationThreadCommandReceiptPage =
+  typeof OrchestrationThreadCommandReceiptPage.Type;
+
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
   commandId: CommandId,

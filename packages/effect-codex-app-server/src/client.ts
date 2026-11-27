@@ -84,6 +84,43 @@ type ServerNotificationHandler = (
   payload: unknown,
 ) => Effect.Effect<void, CodexError.CodexAppServerError>;
 
+// The pinned schemas cover notification clocks but predate the flattened
+// ThreadItem clocks. Keep just these optional fields from newer Codex peers.
+const readItemClockFields = Schema.decodeUnknownOption(
+  Schema.Struct({
+    item: Schema.Struct({
+      startedAtMs: Schema.optionalKey(Schema.Unknown),
+      completedAtMs: Schema.optionalKey(Schema.Unknown),
+    }),
+  }),
+);
+
+const isItemClock = Schema.is(Schema.Int.check(Schema.isGreaterThan(0)));
+
+function preserveItemLifecycleClocks(method: string, raw: unknown, decoded: unknown): unknown {
+  if (
+    (method !== "item/started" && method !== "item/completed") ||
+    typeof decoded !== "object" ||
+    decoded === null ||
+    !("item" in decoded) ||
+    typeof decoded.item !== "object" ||
+    decoded.item === null
+  ) {
+    return decoded;
+  }
+  const clocks = readItemClockFields(raw);
+  if (clocks._tag === "None") return decoded;
+  const { startedAtMs, completedAtMs } = clocks.value.item;
+  return {
+    ...decoded,
+    item: {
+      ...decoded.item,
+      ...(isItemClock(startedAtMs) ? { startedAtMs } : {}),
+      ...(isItemClock(completedAtMs) ? { completedAtMs } : {}),
+    },
+  };
+}
+
 const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
   stdio: Stdio.Stdio,
   options: CodexAppServerClientOptions = {},
@@ -150,9 +187,14 @@ const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(func
 
     if (schema) {
       return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
-        Effect.flatMap((decoded) =>
-          Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
-        ),
+        Effect.flatMap((decoded) => {
+          const payload = preserveItemLifecycleClocks(
+            notification.method,
+            notification.params,
+            decoded,
+          );
+          return Effect.forEach(handlers, (handler) => handler(payload), { discard: true });
+        }),
         Effect.catch(() => Effect.void),
       );
     }

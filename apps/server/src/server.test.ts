@@ -22,6 +22,7 @@ import {
   OrchestrationShellSnapshot,
   type OrchestrationShellStreamItem,
   OrchestrationThreadDetailSnapshot,
+  OrchestrationThreadCommandReceiptPage,
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
@@ -100,6 +101,9 @@ const decodeTransferThreadSnapshot = Schema.decodeUnknownEffect(
 );
 const decodeTransferShellSnapshot = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationShellSnapshot),
+);
+const decodeCommandReceiptPage = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(OrchestrationThreadCommandReceiptPage),
 );
 const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -11642,6 +11646,366 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 });
+
+it.live(
+  "reads allowlisted Codex execution receipts through the existing scoped thread endpoint",
+  () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const scratch = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-codex-receipts-" });
+      const trace = path.join(scratch, "trace.json");
+      const canary = "PRIVATE_RECEIPT_CANARY";
+      const nativeThread = "synthetic-native-thread";
+      const turn1 = "synthetic-turn-1";
+      const turn2 = "synthetic-turn-2";
+      const commandItem = {
+        type: "commandExecution",
+        id: "call_first",
+        source: "unifiedExecStartup",
+        processId: "4242",
+        command: `echo ${canary}`,
+        cwd: `/fixtures/${canary}`,
+        commandActions: [],
+        status: "inProgress",
+        exitCode: null,
+        durationMs: null,
+        startedAtMs: 1780000000010,
+      };
+      const started = {
+        method: "item/started",
+        params: {
+          threadId: nativeThread,
+          turnId: turn1,
+          startedAtMs: 1780000000011,
+          item: commandItem,
+        },
+      };
+      const terminal = {
+        method: "item/completed",
+        params: {
+          threadId: nativeThread,
+          turnId: turn1,
+          completedAtMs: 1780000000211,
+          item: {
+            ...commandItem,
+            status: "failed",
+            exitCode: 7,
+            durationMs: 199,
+            completedAtMs: 1780000000210,
+            aggregatedOutput: canary,
+          },
+        },
+      };
+      const external = [
+        { type: "mcpToolCall", id: "call_mcp", server: canary },
+        { type: "dynamicToolCall", id: "call_dynamic" },
+      ].map((item) => ({
+        method: "item/completed",
+        params: {
+          threadId: nativeThread,
+          turnId: turn2,
+          completedAtMs: 1780000000310,
+          item: {
+            ...item,
+            tool: canary,
+            arguments: { prompt: canary },
+            durationMs: 12,
+            processId: "4242",
+            exitCode: 0,
+            status: "completed",
+          },
+        },
+      }));
+      yield* fileSystem.writeFileString(
+        trace,
+        JSON.stringify({
+          rootThreadId: nativeThread,
+          turnIds: [turn1, turn2],
+          notificationsByTurn: [
+            [started],
+            [
+              terminal,
+              terminal,
+              {
+                ...started,
+                params: {
+                  ...started.params,
+                  turnId: turn2,
+                  startedAtMs: 1780000000301,
+                  item: { ...commandItem, id: "call_second", startedAtMs: null },
+                },
+              },
+              ...external,
+            ],
+          ],
+        }),
+      );
+      const wrapper = HostProcessPlatform.defaultValue() === "win32" ? "cmd" : "sh";
+      const peer = {
+        binaryPath: path.join(
+          import.meta.dirname,
+          "provider/testFixtures",
+          `codexCollabMockPeer.${wrapper}`,
+        ),
+        environment: {
+          PATH:
+            path.dirname(process.execPath) +
+            (wrapper === "cmd" ? ";" : ":") +
+            (process.env.PATH ?? ""),
+          HOME: scratch,
+          T3_CODEX_COLLAB_SCRIPT: trace,
+          ...(wrapper === "cmd"
+            ? { SystemRoot: process.env.SystemRoot, ComSpec: process.env.ComSpec }
+            : {}),
+        },
+      };
+      const harness = yield* Effect.acquireRelease(
+        makeOrchestrationIntegrationHarness({ codexPeer: peer }),
+        (harness) => harness.dispose,
+      );
+      const threadId = ThreadId.make("receipt-thread");
+      const createdAt = new Date().toISOString();
+      yield* harness.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("receipt-project-create"),
+        projectId: defaultProjectId,
+        title: canary,
+        workspaceRoot: harness.workspaceDir,
+        defaultModelSelection,
+        createdAt,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("receipt-thread-create"),
+        threadId,
+        projectId: defaultProjectId,
+        title: canary,
+        modelSelection: defaultModelSelection,
+        interactionMode: "default",
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: harness.workspaceDir,
+        createdAt,
+      });
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: harness.engine,
+          projectionSnapshotQuery: harness.snapshotQuery,
+        },
+      });
+
+      const url = yield* getHttpServerUrl(`/api/orchestration/threads/${threadId}`);
+      const receiptUrl = `${url}?view=commandReceipts&turnLimit=1`;
+      assert.equal((yield* fetchEffect(receiptUrl)).status, 401);
+      const forbidden = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+        scope: "access:read",
+      });
+      assert.equal(forbidden.response.status, 200);
+      assert.equal(
+        (yield* fetchEffect(receiptUrl, {
+          headers: { authorization: `Bearer ${forbidden.body.access_token ?? ""}` },
+        })).status,
+        403,
+      );
+      const readToken = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+        scope: "orchestration:read",
+      });
+      assert.equal(readToken.response.status, 200);
+      const headers = { authorization: `Bearer ${readToken.body.access_token ?? ""}` };
+      const missing = yield* getHttpServerUrl(
+        "/api/orchestration/threads/missing-receipt-thread?view=commandReceipts",
+      );
+      assert.equal((yield* fetchEffect(missing, { headers })).status, 404);
+      const readPage = Effect.fnUntraced(function* (pageUrl: string) {
+        const response = yield* fetchEffect(pageUrl, { headers });
+        assert.equal(response.status, 200);
+        const body = yield* response.text;
+        assert.notInclude(body, canary);
+        const page = yield* decodeCommandReceiptPage(body);
+        assert.deepEqual(Object.keys(JSON.parse(body)).sort(), [
+          "page",
+          "receipts",
+          "snapshotSequence",
+          "threadId",
+        ]);
+        return page;
+      });
+
+      const startTurn = (n: number) =>
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`receipt-start-${n}`),
+          threadId,
+          message: {
+            messageId: MessageId.make(`receipt-message-${n}`),
+            role: "user",
+            text: canary,
+            attachments: [],
+          },
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          createdAt: new Date().toISOString(),
+        });
+      const events = yield* Queue.unbounded<OrchestrationEvent>();
+      yield* Stream.runForEach(harness.engine.streamDomainEvents, (event) =>
+        Queue.offer(events, event),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      const waitForSettledTurn = Effect.gen(function* () {
+        let running = false;
+        while (true) {
+          const event = yield* Queue.take(events);
+          if (event.type === "thread.session-set" && event.payload.threadId === threadId) {
+            if (event.payload.session.status === "running") running = true;
+            if (running && event.payload.session.status === "ready") return;
+          }
+        }
+      });
+      yield* startTurn(1);
+      yield* waitForSettledTurn;
+      const first = yield* readPage(receiptUrl);
+      assert.equal(first.receipts.length, 1);
+      const { receiptId: firstReceiptId, t3ObservedAt, ...firstFields } = first.receipts[0]!;
+      assert.deepEqual(firstFields, {
+        executor: "nativeCommand",
+        lifecycle: "started",
+        providerInstanceId: defaultModelSelection.instanceId,
+        nativeThreadId: nativeThread,
+        nativeTurnId: turn1,
+        nativeItemId: "call_first",
+        source: "unifiedExecStartup",
+        status: "inProgress",
+        processHandle: "4242",
+        notificationStartedAtMs: 1780000000011,
+        itemStartedAtMs: 1780000000010,
+      });
+      assert.isTrue(Number.isFinite(Date.parse(t3ObservedAt)));
+
+      // Persist the shape written before T3 captured Codex instance bindings.
+      yield* harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("receipt-legacy"),
+        threadId,
+        createdAt,
+        activity: {
+          id: EventId.make("legacy-codex-item"),
+          createdAt,
+          turnId: TurnId.make(turn1),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: canary,
+          payload: {
+            itemType: "command_execution",
+            toolCallId: "call_legacy",
+            data: {
+              threadId: nativeThread,
+              turnId: turn1,
+              item: {
+                type: "commandExecution",
+                id: "call_legacy",
+                status: "completed",
+                exitCode: 0,
+              },
+            },
+          },
+        },
+      });
+
+      yield* harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("receipt-legacy-summary"),
+        threadId,
+        createdAt,
+        activity: {
+          id: EventId.make("legacy-summary-only"),
+          createdAt,
+          turnId: TurnId.make(turn1),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: canary,
+          payload: { itemType: "command_execution", detail: "exit code 0" },
+        },
+      });
+
+      // Starting another synthetic turn releases the first command's delayed
+      // notifications. There is no unified-exec interaction or process poll.
+      yield* startTurn(2);
+      yield* waitForSettledTurn;
+      const latest = yield* readPage(receiptUrl);
+      assert.deepEqual(
+        latest.receipts.map(({ nativeItemId, executor }) => [nativeItemId, executor]).sort(),
+        [
+          ["call_dynamic", "externalDynamic"],
+          ["call_mcp", "externalMcp"],
+          ["call_second", "nativeCommand"],
+        ],
+      );
+      const reusedHandle = latest.receipts.find(({ executor }) => executor === "nativeCommand");
+      assert.equal(reusedHandle?.processHandle, "4242");
+      assert.notProperty(reusedHandle, "itemStartedAtMs");
+      for (const receipt of latest.receipts.filter(
+        ({ executor }) => executor !== "nativeCommand",
+      )) {
+        assert.notProperty(receipt, "processHandle");
+        assert.notProperty(receipt, "exitCode");
+        assert.notProperty(receipt, "durationMs");
+      }
+      assert.isTrue(latest.page.hasMore);
+      const olderUrl = `${receiptUrl}&beforeCursor=${encodeURIComponent(latest.page.beforeCursor!)}`;
+      const older = yield* readPage(olderUrl);
+      assert.isFalse(older.page.hasMore);
+      assert.equal(older.receipts.length, 4);
+      assert.deepEqual((yield* readPage(olderUrl)).receipts, older.receipts);
+      assert.equal(
+        older.receipts.find(({ receiptId }) => receiptId === firstReceiptId)?.t3ObservedAt,
+        t3ObservedAt,
+      );
+      const legacy = older.receipts.find(({ receiptId }) => receiptId === "legacy-codex-item");
+      assert.deepEqual(legacy, {
+        receiptId: EventId.make("legacy-codex-item"),
+        executor: "nativeCommand",
+        lifecycle: "completed",
+        nativeThreadId: nativeThread,
+        nativeTurnId: turn1,
+        nativeItemId: "call_legacy",
+        status: "completed",
+        exitCode: 0,
+        t3ObservedAt: createdAt,
+      });
+      const completions = older.receipts.filter(
+        ({ nativeItemId, lifecycle }) => nativeItemId === "call_first" && lifecycle === "completed",
+      );
+      assert.equal(completions.length, 2);
+      assert.notEqual(completions[0]?.receiptId, completions[1]?.receiptId);
+      for (const { receiptId: _, t3ObservedAt: observedAt, ...fields } of completions) {
+        assert.deepEqual(fields, {
+          executor: "nativeCommand",
+          lifecycle: "completed",
+          providerInstanceId: defaultModelSelection.instanceId,
+          nativeThreadId: nativeThread,
+          nativeTurnId: turn1,
+          nativeItemId: "call_first",
+          source: "unifiedExecStartup",
+          status: "failed",
+          processHandle: "4242",
+          exitCode: 7,
+          durationMs: 199,
+          notificationCompletedAtMs: 1780000000211,
+          itemStartedAtMs: 1780000000010,
+          itemCompletedAtMs: 1780000000210,
+        });
+        assert.isAtLeast(Date.parse(observedAt), Date.parse(t3ObservedAt));
+      }
+      const normalResponse = yield* fetchEffect(url, { headers });
+      const normal = yield* responseJsonEffect<OrchestrationThreadDetailSnapshot>(normalResponse);
+      assert.equal(normal.thread.id, threadId);
+      assert.include(
+        normal.thread.messages.map(({ text }) => text),
+        canary,
+      );
+      assert.notInclude(JSON.stringify(normal), "codexProviderInstanceId");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), Effect.provide(NodeServices.layer)),
+);
 
 it.live(
   "reports thread HTTP and WebSocket transfer budgets",

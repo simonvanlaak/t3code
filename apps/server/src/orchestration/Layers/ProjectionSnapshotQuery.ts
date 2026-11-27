@@ -66,7 +66,10 @@ import {
   decodeThreadDetailPageCursor,
   encodeThreadDetailPageCursor,
 } from "../threadDetailCursor.ts";
-import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
+import {
+  projectActivityPayload,
+  projectCodexReceiptActivity,
+} from "../ActivityPayloadProjection.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
@@ -3249,12 +3252,16 @@ pending_approval_requests AS (
         readonly query?: ProjectionThreadDetailQuery;
       }
     | {
-        readonly mode: "client";
+        readonly mode: "client" | "commandReceipts";
       };
 
   const listProjectedThreadActivities = Effect.fn(
     "ProjectionSnapshotQuery.listProjectedThreadActivities",
-  )(function* (threadId: ThreadId, bounds: ThreadDetailBounds | undefined) {
+  )(function* (
+    threadId: ThreadId,
+    bounds: ThreadDetailBounds | undefined,
+    project: (activity: OrchestrationThreadActivity) => OrchestrationThreadActivity | undefined,
+  ) {
     const [activityIdRows, pinnedActivityIdRows] = yield* Effect.all([
       (bounds === undefined
         ? listThreadActivityIdsByThread({ threadId })
@@ -3299,7 +3306,8 @@ pending_approval_requests AS (
         ),
       );
       for (const row of batchRows) {
-        activities.push(projectActivityPayload(mapThreadActivityRow(row)));
+        const activity = project(mapThreadActivityRow(row));
+        if (activity) activities.push(activity);
       }
     }
 
@@ -3318,8 +3326,12 @@ pending_approval_requests AS (
   ) =>
     Effect.gen(function* () {
       const activitiesEffect =
-        activityRead.mode === "client"
-          ? listProjectedThreadActivities(threadId, bounds)
+        activityRead.mode !== "raw"
+          ? listProjectedThreadActivities(
+              threadId,
+              bounds,
+              activityRead.mode === "client" ? projectActivityPayload : projectCodexReceiptActivity,
+            )
           : Effect.all([
               (activityRead.query?.activityKinds === undefined
                 ? bounds === undefined
@@ -3537,6 +3549,7 @@ pending_approval_requests AS (
   const getThreadDetailSnapshot: ProjectionSnapshotQueryShape["getThreadDetailSnapshot"] = (
     threadId,
     window,
+    activityView = "client",
   ) =>
     // Read the thread detail and the snapshot sequence within a single
     // transaction so the sequence is consistent with the returned state; a
@@ -3549,7 +3562,7 @@ pending_approval_requests AS (
         Effect.gen(function* () {
           if (window?.turnLimit === undefined) {
             const thread = yield* getThreadDetailByIdBounded(threadId, undefined, {
-              mode: "client",
+              mode: activityView,
             });
             if (Option.isNone(thread)) {
               return Option.none<OrchestrationThreadDetailSnapshot>();
@@ -3622,7 +3635,7 @@ pending_approval_requests AS (
               : undefined;
 
           const thread = yield* getThreadDetailByIdBounded(threadId, emptyBounds ?? bounds, {
-            mode: "client",
+            mode: activityView,
           });
           if (Option.isNone(thread)) {
             return Option.none<OrchestrationThreadDetailSnapshot>();

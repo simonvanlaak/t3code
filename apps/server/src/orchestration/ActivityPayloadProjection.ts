@@ -1,3 +1,5 @@
+import * as Schema from "effect/Schema";
+import { CodexExecutionReceipt } from "@t3tools/contracts";
 import { projectQuestionToolInput } from "@t3tools/shared/toolActivity";
 import type {
   OrchestrationEvent,
@@ -418,6 +420,81 @@ function projectAcpContent(value: unknown): Record<string, unknown> | undefined 
   return summary ? { content: summary } : undefined;
 }
 
+const decodeCodexReceipt = Schema.decodeUnknownOption(CodexExecutionReceipt);
+
+export function readCodexReceipt(payload: unknown): CodexExecutionReceipt | undefined {
+  const receipt = decodeCodexReceipt(payload);
+  return receipt._tag === "Some" ? receipt.value : undefined;
+}
+
+const receiptFieldChecks = new Map(
+  Object.entries(CodexExecutionReceipt.fields).map(([key, field]) => [key, Schema.is(field)]),
+);
+
+function receiptOptionalFields(values: Partial<Record<keyof CodexExecutionReceipt, unknown>>) {
+  return Object.fromEntries(
+    Object.entries(values).filter(([key, value]) => receiptFieldChecks.get(key)?.(value)),
+  );
+}
+
+export function projectCodexReceiptActivity(
+  activity: OrchestrationThreadActivity,
+): OrchestrationThreadActivity | undefined {
+  if (activity.kind !== "tool.started" && activity.kind !== "tool.completed") return undefined;
+
+  const payload = asRecord(activity.payload);
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  if (
+    !payload ||
+    !item ||
+    !data ||
+    data.turnId !== activity.turnId ||
+    item.id !== payload.toolCallId
+  ) {
+    return undefined;
+  }
+
+  // Older rows retained the native notification but had no emitting instance binding.
+  // Require matching native and canonical item kinds before interpreting those rows.
+  const executor =
+    item.type === "commandExecution" && payload.itemType === "command_execution"
+      ? "nativeCommand"
+      : item.type === "mcpToolCall" && payload.itemType === "mcp_tool_call"
+        ? "externalMcp"
+        : item.type === "dynamicToolCall" && payload.itemType === "dynamic_tool_call"
+          ? "externalDynamic"
+          : undefined;
+  if (!executor) return undefined;
+
+  const receipt = readCodexReceipt({
+    receiptId: activity.id,
+    executor,
+    lifecycle: activity.kind === "tool.started" ? "started" : "completed",
+    nativeThreadId: data.threadId,
+    nativeTurnId: data.turnId,
+    nativeItemId: item.id,
+    t3ObservedAt: activity.createdAt,
+    ...receiptOptionalFields({
+      providerInstanceId: payload.codexProviderInstanceId,
+      status: item.status,
+      notificationStartedAtMs: data.startedAtMs,
+      notificationCompletedAtMs: data.completedAtMs,
+      itemStartedAtMs: item.startedAtMs,
+      itemCompletedAtMs: item.completedAtMs,
+      ...(executor === "nativeCommand"
+        ? {
+            source: item.source,
+            processHandle: item.processId,
+            exitCode: item.exitCode,
+            durationMs: item.durationMs,
+          }
+        : {}),
+    }),
+  });
+  return receipt ? { ...activity, payload: receipt } : undefined;
+}
+
 /**
  * Removes activity payload fields that no current client reads while retaining
  * the full payload in persistence and the event store.
@@ -436,9 +513,10 @@ export function projectActivityPayload(
     payload.status === "completed" && (itemStatus === "failed" || itemStatus === "declined")
       ? { ...payload, status: itemStatus }
       : payload;
+  const { codexProviderInstanceId: _codexProviderInstanceId, ...clientPayload } = statusPayload;
   const projectedPayload = {
-    ...projectPreviewToolMetadata(data, statusPayload.status),
-    ...statusPayload,
+    ...projectPreviewToolMetadata(data, clientPayload.status),
+    ...clientPayload,
   };
   const questionInput = projectQuestionToolInput(data, payload.title);
 

@@ -66,7 +66,21 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/start") {
-    write({ id, result: fixture.responses.threadStart });
+    const response = fixture.responses.threadStart;
+    if (!script.notificationsByTurn) {
+      write({ id, result: response });
+      return;
+    }
+    const threadId = script.rootThreadId;
+    const cwd = process.cwd();
+    write({
+      id,
+      result: {
+        ...response,
+        cwd,
+        thread: { ...response.thread, id: threadId, sessionId: threadId, cwd },
+      },
+    });
     return;
   }
   if (method === "thread/resume") {
@@ -133,7 +147,8 @@ rl.on("line", (line) => {
         params: { threadId: rootThreadId, turn },
       });
     }
-    for (const notification of script.notifications) {
+    for (const notification of script.notificationsByTurn?.[turnStartCount - 1] ??
+      script.notifications) {
       write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
     }
     for (const request of script.serverRequests ?? []) {

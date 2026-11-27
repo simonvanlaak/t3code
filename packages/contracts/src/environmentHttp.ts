@@ -37,6 +37,7 @@ import {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
   OrchestrationThreadDetailSnapshot,
+  OrchestrationThreadCommandReceiptPage,
 } from "./orchestration.ts";
 import {
   PullRequestDiffInput,
@@ -498,6 +499,7 @@ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
 // to strings). Both fields optional: omitting them keeps the full-snapshot
 // behavior, so pagination stays opt-in per request.
 const EnvironmentOrchestrationThreadSnapshotQuery = {
+  view: Schema.optional(Schema.Literal("commandReceipts")),
   turnLimit: Schema.optional(
     Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
   ),
@@ -524,7 +526,10 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       headers: OptionalBearerHeaders,
       params: EnvironmentOrchestrationThreadSnapshotParams,
       payload: EnvironmentOrchestrationThreadSnapshotQuery,
-      success: OrchestrationThreadDetailSnapshot,
+      success: Schema.Union([
+        OrchestrationThreadDetailSnapshot,
+        OrchestrationThreadCommandReceiptPage,
+      ]),
       error: EnvironmentOrchestrationThreadSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

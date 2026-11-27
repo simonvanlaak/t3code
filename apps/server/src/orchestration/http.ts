@@ -7,7 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
-import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
+import { projectThreadDetailSnapshot, readCodexReceipt } from "./ActivityPayloadProjection.ts";
 import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
 import {
   annotateEnvironmentRequest,
@@ -65,17 +65,20 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.threadSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const receiptView = args.payload.view === "commandReceipts";
+          const turnLimit = args.payload.turnLimit ?? (receiptView ? 10 : undefined);
           const snapshot = yield* projectionSnapshotQuery
             .getThreadDetailSnapshot(
               args.params.threadId,
-              args.payload.turnLimit === undefined
+              turnLimit === undefined
                 ? undefined
                 : {
-                    turnLimit: args.payload.turnLimit,
+                    turnLimit,
                     ...(args.payload.beforeCursor !== undefined
                       ? { beforeCursor: args.payload.beforeCursor }
                       : {}),
                   },
+              receiptView ? "commandReceipts" : "client",
             )
             .pipe(
               Effect.catch((cause) =>
@@ -84,6 +87,25 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             );
           if (Option.isNone(snapshot)) {
             return yield* failEnvironmentNotFound("thread_not_found");
+          }
+          if (receiptView) {
+            const { page, snapshotSequence, thread } = snapshot.value;
+            if (!page) {
+              return yield* failEnvironmentInternal(
+                "orchestration_thread_snapshot_failed",
+                new Error("Missing thread page for command receipt view"),
+              );
+            }
+
+            return {
+              threadId: args.params.threadId,
+              snapshotSequence,
+              page,
+              receipts: thread.activities.flatMap(({ payload }) => {
+                const receipt = readCodexReceipt(payload);
+                return receipt ? [receipt] : [];
+              }),
+            };
           }
           return projectThreadDetailSnapshot(snapshot.value);
         }),

@@ -233,6 +233,10 @@ export interface OrchestrationIntegrationHarness {
 interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly realCodex?: boolean;
+  readonly codexPeer?: {
+    readonly binaryPath: string;
+    readonly environment: NodeJS.ProcessEnv;
+  };
   /** Tracer for every fiber the harness runtime runs, including reactors. */
   readonly tracer?: Tracer.Tracer;
 }
@@ -245,7 +249,7 @@ export const makeOrchestrationIntegrationHarness = (
     const fileSystem = yield* FileSystem.FileSystem;
 
     const provider = options?.provider ?? ProviderDriverKind.make("codex");
-    const useRealCodex = options?.realCodex === true;
+    const useRealCodex = options?.realCodex === true || options?.codexPeer !== undefined;
     const adapterHarness = useRealCodex
       ? null
       : yield* makeTestProviderAdapterHarness({
@@ -280,8 +284,14 @@ export const makeOrchestrationIntegrationHarness = (
     const realCodexRegistry = Layer.effect(
       ProviderAdapterRegistry,
       Effect.gen(function* () {
-        const codexSettings = yield* decodeCodexSettings({});
-        const codexAdapter = yield* makeCodexAdapter(codexSettings);
+        const peer = options?.codexPeer;
+        const codexSettings = yield* decodeCodexSettings(
+          peer ? { binaryPath: peer.binaryPath, homePath: rootDir } : {},
+        );
+        const codexAdapter = yield* makeCodexAdapter(
+          codexSettings,
+          peer ? { environment: peer.environment } : undefined,
+        );
         return makeAdapterRegistryMock({
           [ProviderDriverKind.make("codex")]: codexAdapter,
         });
