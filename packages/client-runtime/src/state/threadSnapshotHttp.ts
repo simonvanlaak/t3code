@@ -10,7 +10,10 @@ import { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
-import type { RemoteEnvironmentRequestError } from "../rpc/http.ts";
+import {
+  RemoteEnvironmentAuthInvalidJsonError,
+  type RemoteEnvironmentRequestError,
+} from "../rpc/http.ts";
 import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
 
 // Bounded so a pathologically slow endpoint cannot block the (cheaper) socket
@@ -43,7 +46,7 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
   readonly timeoutMs?: number;
   readonly window?: ThreadSnapshotWindow;
 }) {
-  return yield* executeAuthenticatedEnvironmentHttpRequest({
+  const snapshot = yield* executeAuthenticatedEnvironmentHttpRequest({
     ...input,
     group: "orchestration",
     method: "GET",
@@ -61,6 +64,11 @@ export const fetchEnvironmentThreadSnapshot = Effect.fn(
         },
         headers,
       }),
+  });
+  if ("thread" in snapshot) return snapshot;
+  return yield* new RemoteEnvironmentAuthInvalidJsonError({
+    message: "Expected a thread snapshot, but the server returned a command receipt page.",
+    cause: undefined,
   });
 });
 

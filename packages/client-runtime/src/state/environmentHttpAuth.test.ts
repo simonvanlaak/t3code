@@ -226,6 +226,25 @@ describe("authenticated environment HTTP requests", () => {
     }),
   );
 
+  it.effect("rejects a command receipt page in a thread snapshot request", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness(() =>
+        Response.json({
+          threadId: THREAD.thread.id,
+          snapshotSequence: THREAD.snapshotSequence,
+          page: THREAD.page,
+          receipts: [],
+        }),
+      );
+      const error = yield* fetchEnvironmentThreadSnapshot({
+        ...harness.input,
+        threadId: THREAD.thread.id,
+      }).pipe(Effect.provide(harness.httpLayer), Effect.flip);
+      expect(error._tag).toBe("RemoteEnvironmentAuthInvalidJsonError");
+      expect(harness.calls).toHaveLength(1);
+    }),
+  );
+
   it.effect.each(LOADERS)("uses current relay authorization and endpoint for $name", (loader) =>
     Effect.gen(function* () {
       const harness = makeHarness(() => Response.json(loader.response));
